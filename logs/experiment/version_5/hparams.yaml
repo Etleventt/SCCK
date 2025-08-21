@@ -1,0 +1,69 @@
+generator_params:
+  self_recursion: true
+  image_size: 64
+  z_emb_dim: 256
+  ch_mult:
+  - 1
+  - 1
+  - 2
+  - 2
+  - 4
+  - 4
+  num_res_blocks: 2
+  attn_resolutions:
+  - 16
+  dropout: 0.0
+  resamp_with_conv: true
+  conditional: true
+  fir: true
+  fir_kernel:
+  - 1
+  - 3
+  - 3
+  - 1
+  skip_rescale: true
+  resblock_type: biggan
+  progressive: none
+  progressive_input: residual
+  embedding_type: positional
+  combine_method: sum
+  fourier_scale: 16
+  nf: 64
+  num_channels: 2
+  nz: 100
+  n_mlp: 3
+  centered: true
+  not_use_tanh: false
+discriminator_params:
+  nc: 2
+  ngf: 32
+  t_emb_dim: 256
+diffusion_params:
+  n_steps: 10
+  beta_start: 0.1
+  beta_end: 3.0
+  gamma: 1
+  n_recursions: 2
+  consistency_threshold: 0.01
+lr_g: 0.00016
+lr_d: 0.0001
+disc_grad_penalty_freq: 10
+disc_grad_penalty_weight: 0.5
+lambda_rec_loss: 0.5
+optim_betas:
+- 0.5
+- 0.9
+eval_mask: true
+eval_subject: true
+_instantiator: lightning.pytorch.cli.instantiate_module
+dataset_dir: /home/xiaobin/Projects/SelfRDB/dataset/BraTS64
+source_modality: T1
+target_modality: T2
+dataset_class: NumpyDataset
+image_size: 64
+padding: false
+norm: true
+train_batch_size: 100
+val_batch_size: 64
+test_batch_size: 32
+num_workers: 8

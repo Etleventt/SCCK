@@ -1,0 +1,101 @@
+# lightning.pytorch==2.0.9.post0
+seed_everything: 42
+
+trainer:
+  accelerator: gpu
+  # 如果你只用1张卡，把 devices 改为 [0]，并把 strategy 改成 auto、sync_batchnorm 关掉（见下面“单卡选项”）
+  strategy: ddp_find_unused_parameters_true
+  devices: [0,1]
+  num_nodes: 1
+  precision: 32
+  logger:
+    - class_path: CSVLogger
+      init_args:
+        save_dir: logs
+        name: experiment
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 1
+        leave: true
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        every_n_epochs: 10
+        save_on_train_epoch_end: true
+        save_top_k: -1
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: step
+  max_epochs: 50
+  check_val_every_n_epoch: 10
+  num_sanity_val_steps: 0
+  log_every_n_steps: 1
+  deterministic: true
+  inference_mode: true
+  use_distributed_sampler: true
+  sync_batchnorm: true   # 多卡才开；单卡请关掉
+
+model:
+  lr_g: 0.00016
+  lr_d: 0.0001
+  disc_grad_penalty_freq: 10
+  disc_grad_penalty_weight: 0.5
+  lambda_rec_loss: 0.5
+  optim_betas: [0.5, 0.9]
+  eval_mask: true
+  eval_subject: true
+
+  diffusion_params:
+    n_steps: 10
+    beta_start: 0.1
+    beta_end: 3.0
+    gamma: 1
+    n_recursions: 2
+    consistency_threshold: 0.01
+
+  generator_params:
+    self_recursion: true
+    image_size: ${data.image_size}   # 跟 data.image_size 走
+    z_emb_dim: 256
+    ch_mult: [1, 1, 2, 2, 4, 4]
+    num_res_blocks: 2
+    attn_resolutions: [16]
+    dropout: 0.0
+    resamp_with_conv: true
+    conditional: true
+    fir: true
+    fir_kernel: [1, 3, 3, 1]
+    skip_rescale: true
+    resblock_type: biggan
+    progressive: none
+    progressive_input: residual
+    embedding_type: positional
+    combine_method: sum
+    fourier_scale: 16
+    nf: 64
+    num_channels: 2        # 保持原仓库默认（生成器内部需要用到2通道：x_t 与条件）
+    nz: 100
+    n_mlp: 3
+    centered: true
+    not_use_tanh: false
+
+  discriminator_params:
+    nc: 2                  # 判别器期望 x_t, x_{t-1} 两通道
+    ngf: 32
+    t_emb_dim: 256
+
+data:
+  train_batch_size: 100     # 64×64 可以大点；显存不够就调小
+  val_batch_size: 64
+  test_batch_size: 32
+
+  dataset_dir: /home/xiaobin/Projects/SelfRDB/dataset/BraTS64   # 指向你的小分辨率数据
+  source_modality: T1      # 注意大小写与文件夹一致（T1/T2/FLAIR/T1CE）
+  target_modality: T2
+  dataset_class: NumpyDataset
+  image_size: 64           # ★ 关键：和我们的数据一致
+  padding: false           # ★ 关键：已经 64×64 不需要再 pad
+  norm: true
+  num_workers: 8           # 32 可能太激进，先 8~16 比较稳
+
+ckpt_path:
