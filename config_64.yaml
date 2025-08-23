@@ -26,8 +26,8 @@ trainer:
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:
         logging_interval: step
-  max_epochs: 50
-  check_val_every_n_epoch: 10
+  max_epochs: 5000
+  check_val_every_n_epoch: 50
   num_sanity_val_steps: 0
   log_every_n_steps: 1
   deterministic: true
@@ -89,9 +89,9 @@ data:
   val_batch_size: 64
   test_batch_size: 32
 
-  dataset_dir: /home/xiaobin/Projects/SelfRDB/dataset/BraTS64   # 指向你的小分辨率数据
-  source_modality: T1      # 注意大小写与文件夹一致（T1/T2/FLAIR/T1CE）
-  target_modality: T2
+  dataset_dir: /home/xiaobin/Projects/SelfRDB/dataset/brats64_ref_t1   # 指向你的小分辨率数据
+  source_modality: t1      # 注意大小写与文件夹一致（T1/T2/FLAIR/T1CE）
+  target_modality: t2
   dataset_class: NumpyDataset
   image_size: 64           # ★ 关键：和我们的数据一致
   padding: false           # ★ 关键：已经 64×64 不需要再 pad

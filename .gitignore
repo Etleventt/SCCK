@@ -1,1 +1,4 @@
 *.npy
+*.ckpt
+*.png
+*.csv

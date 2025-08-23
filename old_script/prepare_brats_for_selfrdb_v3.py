@@ -1,14 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-python prepare_brats_for_selfrdb_v3_lower.py \
-  --root /home/xiaobin/Projects/DBAE/data/raw/brats \
-  --out_root /home/xiaobin/Projects/SelfRDB/dataset/brats64_ref_t1 \
-  --modalities t1,t2,flair,t1ce \
-  --ref_mod t1 --target_mod t2 \
-  --split 0.8 0.1 0.1 \
-  --size 64 --per_volume 0 --z_lo 0.15 --z_hi 0.95 \
-  --p_lo 0.5 --p_hi 99.5
+Prepare BraTS -> SelfRDB with *reference modality* cropping.
+- One-pass load T1/T2/FLAIR/T1CE per subject
+- Build bbox from REF modality (e.g., T1) nonzero mask
+- Apply the *same* bbox to all modalities
+- Resize to image_size, normalize to [0,1]
+- Save slice_*.npy for each modality and mask/ from REF
+- Write subject_ids_*.txt and manifest.json
 """
 import argparse, os, math, json, random
 from pathlib import Path
@@ -34,8 +33,8 @@ def mod_file(sub: Path, m: str) -> Optional[Path]:
 
 def as_ras_axial(nii: nib.Nifti1Image) -> np.ndarray:
     ras=nib.as_closest_canonical(nii)
-    arr=ras.get_fdata(dtype=np.float32)
-    return np.transpose(arr,(2,1,0))  # (Z,H,W)
+    arr=ras.get_fdata(dtype=np.float32)         # (X,Y,Z)
+    return np.transpose(arr,(2,1,0))            # (Z,H,W)
 
 def square_bbox_from_mask(mask: np.ndarray, pad:int=0) -> Tuple[slice,slice]:
     H,W=mask.shape
@@ -59,21 +58,17 @@ def percentile_minmax(img: np.ndarray, mask: np.ndarray, p_lo=0.5, p_hi=99.5, ep
     x=(img-lo)/(hi-lo+eps)
     return np.clip(x,0.0,1.0).astype(np.float32)
 
-from PIL import Image
+def resize01(img01: np.ndarray, size: Optional[int]):
+    if not size: return img01
+    pil=Image.fromarray((img01*255.0).astype(np.uint8), mode="L")
+    pil=pil.resize((size,size), Image.BICUBIC)
+    return (np.asarray(pil,dtype=np.uint8)/255.0).astype(np.float32)
 
-def resize01(img01: np.ndarray, size: int):
-    from PIL import Image
-    pil = Image.fromarray(img01.astype(np.float32), mode="F")
-    pil = pil.resize((size, size), Image.BICUBIC)
-    arr = np.asarray(pil, dtype=np.float32).copy()
-    return np.clip(arr, 0.0, 1.0)   # ★ 关键：插值后 clip
-
-def resize_mask(mask: np.ndarray, size: int):
-    from PIL import Image
-    pil = Image.fromarray(mask.astype(np.float32), mode="F")
-    pil = pil.resize((size, size), Image.BICUBIC)
-    arr = np.asarray(pil, dtype=np.float32).copy()
-    return (arr >= 0.5).astype(np.uint8)
+def resize_mask(mask: np.ndarray, size: Optional[int]):
+    if not size: return (mask>0).astype(np.uint8)
+    pil=Image.fromarray(((mask>0).astype(np.uint8)*255), mode="L")
+    pil=pil.resize((size,size), Image.NEAREST)
+    return (np.asarray(pil,dtype=np.uint8)>127).astype(np.uint8)
 
 def split_subjects(sids: List[str], ratios=(0.8,0.1,0.1), seed=42):
     assert abs(sum(ratios)-1.0)<1e-6
@@ -82,15 +77,15 @@ def split_subjects(sids: List[str], ratios=(0.8,0.1,0.1), seed=42):
     return {"train": sids[:n_tr], "val": sids[n_tr:n_tr+n_va], "test": sids[n_tr+n_va:]}
 
 def main():
-    ap=argparse.ArgumentParser("BraTS->SelfRDB (ref=t1, lowercase, bg-masked)")
+    ap=argparse.ArgumentParser("BraTS -> SelfRDB with REF-modality cropping")
     ap.add_argument("--root", required=True, type=Path)
     ap.add_argument("--out_root", required=True, type=Path)
     ap.add_argument("--modalities", default="t1,t2,flair,t1ce")
-    ap.add_argument("--ref_mod", default="t1")
-    ap.add_argument("--target_mod", default="t2")
+    ap.add_argument("--ref_mod", default="t1", help="参考模态（例如 t1）")
+    ap.add_argument("--target_mod", default="t2", help="训练目标（仅写 manifest 用）")
     ap.add_argument("--split", nargs=3, type=float, default=[0.8,0.1,0.1])
     ap.add_argument("--size", type=int, default=64)
-    ap.add_argument("--per_volume", type=int, default=0)
+    ap.add_argument("--per_volume", type=int, default=0)  # 0=用全部切片
     ap.add_argument("--z_lo", type=float, default=0.15)
     ap.add_argument("--z_hi", type=float, default=0.95)
     ap.add_argument("--p_lo", type=float, default=0.5)
@@ -116,7 +111,7 @@ def main():
     sids=sorted(sid2files.keys())
     splits=split_subjects(sids, tuple(args.split), seed=42)
 
-    for name in [*mods, "mask"]:
+    for name in [*map(str.upper,mods), "mask"]:
         for sp in ["train","val","test"]:
             (args.out_root/name/sp).mkdir(parents=True, exist_ok=True)
 
@@ -127,7 +122,7 @@ def main():
     for sp, sid_list in splits.items():
         for sid in sid_list:
             files=sid2files[sid]
-            vols={m: as_ras_axial(nib.load(str(files[m]))) for m in mods}
+            vols={m: as_ras_axial(nib.load(str(files[m]))) for m in mods}  # (Z,H,W)
             Z,H,W=next(iter(vols.values())).shape
             if any(v.shape!=(Z,H,W) for v in vols.values()):
                 print(f"[skip] shape mismatch: {sid}"); continue
@@ -137,44 +132,37 @@ def main():
             zs=range(z0,z1)
             if args.per_volume and args.per_volume>0:
                 base=np.linspace(z0, z1-1, num=args.per_volume)
-                zs=np.clip(np.round(base + rng.uniform(-1,1,len(base))).astype(int), z0, z1-1)
+                zs=np.clip(np.round(base + rng.uniform(-1,1,size=len(base))).astype(int), z0, z1-1)
 
             for z in zs:
+                # 先用 REF 的非零定义裁剪窗口
                 ref_slice=vols[ref][z]
                 ref_mask=(ref_slice>1e-6).astype(np.uint8)
                 if ref_mask.sum()<32: continue
                 sy,sx=square_bbox_from_mask(ref_mask, pad=0)
 
+                # 同一窗口裁剪所有模态
                 crops={m: vols[m][z][sy, sx] for m in mods}
                 ref_mask=ref_mask[sy, sx]
-                # 在 crops / ref_mask 得到后、resize 之前，加上这段：
-                tgt = crops[args.target_mod]  # 这里 target_mod 是小写，如 "t2"
-                inside = tgt[ref_mask > 0]
-                nz_frac = float((inside > 1e-6).mean())
-                std_val = float(inside.std())
-                # 这两个阈值给你合理默认；需要更严可以再收紧
-                MIN_NZ_FRAC = 0.02    # 目标模态在掩膜内，至少 2% 像素非零
-                MIN_STD     = 1e-4    # 目标模态在掩膜内的强度标准差下限
 
-                if (nz_frac < MIN_NZ_FRAC) or (std_val < MIN_STD):
-                    continue  # 丢弃这张切片（通常是顶部/底部极薄的切片，或异常全黑）
-                # 先得到低分辨率的 mask，再用它清零所有模态的背景
+                # 统一用 REF 掩膜计算分位→归一化到[0,1]，然后 resize
+                imgs01={}
+                for m in mods:
+                    imgs01[m]=percentile_minmax(crops[m], ref_mask, args.p_lo, args.p_hi)
+                    imgs01[m]=resize01(imgs01[m], args.size)
                 mask01=resize_mask(ref_mask, args.size)
 
+                idx=counters[sp]
                 for m in mods:
-                    x = percentile_minmax(crops[m], ref_mask, args.p_lo, args.p_hi)
-                    x = resize01(x, args.size)
-                    x = (x * mask01.astype(np.float32)).astype(np.float32)  # ★ 清零背景，避免插值渗漏
-                    np.save(args.out_root/m/sp/f"slice_{counters[sp]}.npy", x.astype(np.float32))
-
-                np.save(args.out_root/"mask"/sp/f"slice_{counters[sp]}.npy", mask01.astype(np.uint8))
+                    np.save(args.out_root/str.upper(m)/sp/f"slice_{idx}.npy", imgs01[m])
+                np.save(args.out_root/"mask"/sp/f"slice_{idx}.npy", mask01.astype(np.uint8))
                 subject_ids[sp].append(f"{sid}|z={int(z)}")
                 counters[sp]+=1
 
     (args.out_root/"manifest.json").write_text(json.dumps({
-        "modalities": mods,
-        "ref_mod": ref,
-        "target_mod": args.target_mod.lower(),
+        "modalities":[m.upper() for m in mods],
+        "ref_mod": ref.upper(),
+        "target_mod": args.target_mod.upper(),
         "splits": counters,
         "image_size": args.size,
         "z_range":[args.z_lo,args.z_hi],

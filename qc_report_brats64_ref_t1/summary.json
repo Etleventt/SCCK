@@ -1,0 +1,38 @@
+{
+  "root": "/home/xiaobin/Projects/SelfRDB/dataset/brats64_ref_t1",
+  "image_size": 64,
+  "modalities": [
+    "t1",
+    "t2",
+    "flair",
+    "t1ce"
+  ],
+  "target": "t2",
+  "splits_counts": {
+    "train": {
+      "t1": 15353,
+      "t2": 15353,
+      "flair": 15353,
+      "t1ce": 15353,
+      "mask": 15353
+    },
+    "val": {
+      "t1": 1862,
+      "t2": 1862,
+      "flair": 1862,
+      "t1ce": 1862,
+      "mask": 1862
+    },
+    "test": {
+      "t1": 2081,
+      "t2": 2081,
+      "flair": 2081,
+      "t1ce": 2081,
+      "mask": 2081
+    }
+  },
+  "problems": [],
+  "subject_leaks": [],
+  "iou_thr": 0.995,
+  "nz_thr": 1e-06
+}

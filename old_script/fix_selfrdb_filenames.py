@@ -1,5 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+"""
+# 路径按你的实际修改
+python fix_selfrdb_filenames.py \
+  --root /home/xiaobin/Projects/SelfRDB/dataset/BraTS64 \
+  --modalities T1 T2 FLAIR T1CE
+"""
 import argparse, re
 from pathlib import Path
 
