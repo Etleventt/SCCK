@@ -1,0 +1,102 @@
+{
+  "root": "/home/xiaobin/Projects/SelfRDB/dataset/brats64_selfrdb",
+  "modalities": [
+    "t1",
+    "t2",
+    "t1ce",
+    "flair"
+  ],
+  "splits": {
+    "train": {
+      "slice_count_common": 96188,
+      "nz_frac_median_first_mod": 0.2452392578125,
+      "edge_median_first_mod": {
+        "top": 0.0,
+        "bottom": 0.0,
+        "left": 0.0,
+        "right": 0.0
+      },
+      "center_summary_first_mod": {
+        "H": 64,
+        "W": 64,
+        "cy_median": 28.739358880556065,
+        "cx_median": 31.634550846293816,
+        "cy_mean": 27.38981965800382,
+        "cx_mean": 31.615232082231337,
+        "dist_to_center_mean": 4.1920377396561515
+      },
+      "stats_csv": "/home/xiaobin/Projects/SelfRDB/qc_brats64/edge_stats_train.csv",
+      "mosaic_png": "/home/xiaobin/Projects/SelfRDB/qc_brats64/mosaic_train.png"
+    },
+    "val": {
+      "slice_count_common": 11861,
+      "nz_frac_median_first_mod": 0.226318359375,
+      "edge_median_first_mod": {
+        "top": 0.0,
+        "bottom": 0.0,
+        "left": 0.0,
+        "right": 0.0
+      },
+      "center_summary_first_mod": {
+        "H": 64,
+        "W": 64,
+        "cy_median": 28.469667527701155,
+        "cx_median": 31.682802868780108,
+        "cy_mean": 27.42279449379601,
+        "cx_mean": 31.66524557549491,
+        "dist_to_center_mean": 4.147971081672378
+      },
+      "stats_csv": "/home/xiaobin/Projects/SelfRDB/qc_brats64/edge_stats_val.csv",
+      "mosaic_png": "/home/xiaobin/Projects/SelfRDB/qc_brats64/mosaic_val.png"
+    },
+    "test": {
+      "slice_count_common": 11934,
+      "nz_frac_median_first_mod": 0.23193359375,
+      "edge_median_first_mod": {
+        "top": 0.0,
+        "bottom": 0.0,
+        "left": 0.0,
+        "right": 0.0
+      },
+      "center_summary_first_mod": {
+        "H": 64,
+        "W": 64,
+        "cy_median": 28.673873873873873,
+        "cx_median": 31.655335968379447,
+        "cy_mean": 27.703273401592618,
+        "cx_mean": 31.55789728472265,
+        "dist_to_center_mean": 3.9164845543984894
+      },
+      "stats_csv": "/home/xiaobin/Projects/SelfRDB/qc_brats64/edge_stats_test.csv",
+      "mosaic_png": "/home/xiaobin/Projects/SelfRDB/qc_brats64/mosaic_test.png"
+    }
+  },
+  "thr": 0.0001,
+  "edge_band": 8,
+  "has_mask_folder": true,
+  "has_manifest": true,
+  "manifest": {
+    "modalities": [
+      "t1",
+      "t2",
+      "t1ce",
+      "flair"
+    ],
+    "ref_mod": "t1",
+    "export_size": 64,
+    "z_range": [
+      0.15,
+      0.95
+    ],
+    "q": [
+      0.5,
+      99.5
+    ],
+    "splits": {
+      "train": 84568,
+      "val": 10466,
+      "test": 10488
+    },
+    "note": "Images scaled to [0,1] (SelfRDB README requirement)."
+  }
+}

@@ -1,0 +1,111 @@
+{
+  "root": "/home/xiaobin/Projects/SelfRDB/dataset/brats64_only/size64_resize",
+  "modalities": [
+    "t1",
+    "t2",
+    "t1ce",
+    "flair"
+  ],
+  "splits": {
+    "train": {
+      "slice_count_common": 111600,
+      "nz_frac_median_first_mod": 0.22412109375,
+      "edge_median_first_mod": {
+        "top": 0.0,
+        "bottom": 0.0,
+        "left": 0.0,
+        "right": 0.0
+      },
+      "center_summary_first_mod": {
+        "H": 64,
+        "W": 64,
+        "cy_median": 27.999276410998554,
+        "cx_median": 31.66139954853273,
+        "cy_mean": 26.76024457991772,
+        "cx_mean": 31.62980091610986,
+        "dist_to_center_mean": 4.821970029280387
+      },
+      "stats_csv": "/home/xiaobin/Projects/SelfRDB/qc_brats64_only/edge_stats_train.csv",
+      "mosaic_png": "/home/xiaobin/Projects/SelfRDB/qc_brats64_only/mosaic_train.png"
+    },
+    "val": {
+      "slice_count_common": 13950,
+      "nz_frac_median_first_mod": 0.217529296875,
+      "edge_median_first_mod": {
+        "top": 0.0,
+        "bottom": 0.0,
+        "left": 0.0,
+        "right": 0.0
+      },
+      "center_summary_first_mod": {
+        "H": 64,
+        "W": 64,
+        "cy_median": 27.913752913752912,
+        "cx_median": 31.673027989821882,
+        "cy_mean": 26.70893335963192,
+        "cx_mean": 31.649683029017158,
+        "dist_to_center_mean": 4.8746271912143895
+      },
+      "stats_csv": "/home/xiaobin/Projects/SelfRDB/qc_brats64_only/edge_stats_val.csv",
+      "mosaic_png": "/home/xiaobin/Projects/SelfRDB/qc_brats64_only/mosaic_val.png"
+    },
+    "test": {
+      "slice_count_common": 13950,
+      "nz_frac_median_first_mod": 0.222900390625,
+      "edge_median_first_mod": {
+        "top": 0.0,
+        "bottom": 0.0,
+        "left": 0.0,
+        "right": 0.0
+      },
+      "center_summary_first_mod": {
+        "H": 64,
+        "W": 64,
+        "cy_median": 28.03181818181818,
+        "cx_median": 31.64428857715431,
+        "cy_mean": 26.880067828594925,
+        "cx_mean": 31.54625956328461,
+        "dist_to_center_mean": 4.740683428541848
+      },
+      "stats_csv": "/home/xiaobin/Projects/SelfRDB/qc_brats64_only/edge_stats_test.csv",
+      "mosaic_png": "/home/xiaobin/Projects/SelfRDB/qc_brats64_only/mosaic_test.png"
+    }
+  },
+  "thr": 0.0001,
+  "edge_band": 8,
+  "has_mask_folder": false,
+  "has_manifest": true,
+  "manifest": {
+    "modalities": [
+      "t1",
+      "t2",
+      "t1ce",
+      "flair"
+    ],
+    "size": 64,
+    "size_mode": "resize",
+    "splits_counts": {
+      "train": 111600,
+      "val": 13950,
+      "test": 13950
+    },
+    "global_lo": {
+      "t1": 0.0,
+      "t2": 0.0,
+      "t1ce": 0.0,
+      "flair": 0.0
+    },
+    "global_hi": {
+      "t1": 8696.0,
+      "t2": 9413.00500000082,
+      "t1ce": 9158.0,
+      "flair": 12472.0
+    },
+    "seed": 42,
+    "notes": {
+      "geometry": "direct from original slice; crop/resize as requested",
+      "resize_from": "orig",
+      "canonical256": 0
+    }
+  }
+}

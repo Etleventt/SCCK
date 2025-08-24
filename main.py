@@ -13,6 +13,7 @@ from backbones.ncsnpp import NCSNpp
 from backbones.discriminator import Discriminator_large
 from datasets import DataModule
 from utils import compute_metrics, save_image_pair, save_preds, save_eval_images
+# import torch; torch.set_float32_matmul_precision('high')
 
 
 class BridgeRunner(L.LightningModule):

@@ -3,7 +3,7 @@ seed_everything: 42
 trainer:
   accelerator: gpu
   strategy: ddp_find_unused_parameters_true
-  devices: [0]
+  devices: [0,1]
   num_nodes: 1
   precision: 32
   logger:
@@ -13,17 +13,16 @@ trainer:
         name: experiment
 
   callbacks:
-    - class_path: RichProgressBar
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args:
-        leave: True
-
-    - class_path: ModelCheckpoint
+        refresh_rate: 1
+        leave: true
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         every_n_epochs: 10
         save_on_train_epoch_end: True
         save_top_k: -1
-
-    - class_path: LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:
         logging_interval: step
 
@@ -43,7 +42,7 @@ model:
   disc_grad_penalty_weight: 0.5         # Gradient penalty weight for the discriminator
   lambda_rec_loss: 0.5                  # Reconstruction loss weight
   optim_betas: [0.5, 0.9]               # Adam optimizer betas
-  eval_mask: True                       # Whether to use mask during test
+  eval_mask: False                       # Whether to use mask during test
   eval_subject: True                    # Whether to evaluate subject-wise during test (`subject_ids` should be provided in the test dataset)
 
   diffusion_params:
@@ -88,11 +87,11 @@ model:
 data:
   train_batch_size: 4
   val_batch_size: 4
-  test_batch_size: 32
+  test_batch_size: 64
 
-  dataset_dir: ./dataset
-  source_modality: T1
-  target_modality: T2
+  dataset_dir: ./dataset/brats256_selfrdb_small  # Path to the dataset directory
+  source_modality: t1
+  target_modality: t2
   dataset_class: NumpyDataset           # Dataset class name that can be customized in datasets.py
   image_size: 256                       # Image size used in padding
   padding: True                         # Whether to pad the input

@@ -1,0 +1,116 @@
+{
+  "root": "/home/xiaobin/Projects/SelfRDB/dataset/brats64_selfrdb",
+  "modalities": [
+    "t1",
+    "t2",
+    "t1ce",
+    "flair"
+  ],
+  "splits": {
+    "train": {
+      "slice_count_common": 96188,
+      "nz_frac_median_first_mod": 0.99560546875,
+      "edge_median_first_mod": {
+        "top": 1.0,
+        "bottom": 0.9921875,
+        "left": 1.0,
+        "right": 1.0
+      },
+      "center_summary_first_mod": {
+        "H": 64,
+        "W": 64,
+        "cy_median": 31.43208850959068,
+        "cx_median": 31.5,
+        "cy_mean": 25.752949711977205,
+        "cx_mean": 31.551633407962175,
+        "dist_to_center_mean": 5.8568569092876155
+      },
+      "stats_csv": "/home/xiaobin/Projects/SelfRDB/qc_brats64_selfrdb/edge_stats_train.csv",
+      "mosaic_png": "/home/xiaobin/Projects/SelfRDB/qc_brats64_selfrdb/mosaic_train.png"
+    },
+    "val": {
+      "slice_count_common": 11861,
+      "nz_frac_median_first_mod": 0.989990234375,
+      "edge_median_first_mod": {
+        "top": 1.0,
+        "bottom": 0.98046875,
+        "left": 1.0,
+        "right": 1.0
+      },
+      "center_summary_first_mod": {
+        "H": 64,
+        "W": 64,
+        "cy_median": 31.317829121331656,
+        "cx_median": 31.5,
+        "cy_mean": 25.702731874990306,
+        "cx_mean": 31.679924306862336,
+        "dist_to_center_mean": 5.879366310218135
+      },
+      "stats_csv": "/home/xiaobin/Projects/SelfRDB/qc_brats64_selfrdb/edge_stats_val.csv",
+      "mosaic_png": "/home/xiaobin/Projects/SelfRDB/qc_brats64_selfrdb/mosaic_val.png"
+    },
+    "test": {
+      "slice_count_common": 11934,
+      "nz_frac_median_first_mod": 0.9947509765625,
+      "edge_median_first_mod": {
+        "top": 1.0,
+        "bottom": 0.99609375,
+        "left": 1.0,
+        "right": 1.0
+      },
+      "center_summary_first_mod": {
+        "H": 64,
+        "W": 64,
+        "cy_median": 31.424620655898188,
+        "cx_median": 31.5,
+        "cy_mean": 25.924163634372,
+        "cx_mean": 31.555481662803555,
+        "dist_to_center_mean": 5.693299029155462
+      },
+      "stats_csv": "/home/xiaobin/Projects/SelfRDB/qc_brats64_selfrdb/edge_stats_test.csv",
+      "mosaic_png": "/home/xiaobin/Projects/SelfRDB/qc_brats64_selfrdb/mosaic_test.png"
+    }
+  },
+  "thr": 0.0001,
+  "edge_band": 8,
+  "has_mask_folder": false,
+  "has_manifest": true,
+  "manifest": {
+    "modalities": [
+      "t1",
+      "t2",
+      "t1ce",
+      "flair"
+    ],
+    "splits_counts": {
+      "train": 96188,
+      "val": 11861,
+      "test": 11934
+    },
+    "size": 64,
+    "brain_slice_thr": 0.01,
+    "q_lo": 0.1,
+    "q_hi": 99.9,
+    "global_lo": {
+      "t1": 0.09855511274933815,
+      "t2": 0.0471914656534791,
+      "t1ce": 0.12129699585586787,
+      "flair": 0.04725672634691
+    },
+    "global_hi": {
+      "t1": 1.8175161482096207,
+      "t2": 3.473179449081478,
+      "t1ce": 3.5256154544353486,
+      "flair": 3.092782801866542
+    },
+    "seed": 42,
+    "max_slices_per_split": 0,
+    "notes": {
+      "mean_norm": "per-volume mean within union brain mask set to 1",
+      "global_scale": "train-set robust percentiles per modality mapped to [-1,1], saved to [0,1]",
+      "pad": "zero-pad/crop to 256",
+      "device": "cpu",
+      "p1_workers": 8
+    }
+  }
+}

@@ -2,3 +2,5 @@
 *.ckpt
 *.png
 *.csv
+oneclick_out/
+dataset/
