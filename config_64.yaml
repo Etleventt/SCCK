@@ -42,7 +42,7 @@ model:
   disc_grad_penalty_weight: 0.5
   lambda_rec_loss: 0.5
   optim_betas: [0.5, 0.9]
-  eval_mask: false
+  eval_mask: true
   eval_subject: true
 
   diffusion_params:
@@ -87,7 +87,7 @@ model:
 data:
   train_batch_size: 100     # 64×64 可以大点；显存不够就调小
   val_batch_size: 64
-  test_batch_size: 1280
+  test_batch_size: 1500
 
   dataset_dir: /home/xiaobin/Projects/SelfRDB/dataset/brats64_selfrdb_clean_copy_withmask  # 指向你的小分辨率数据
   source_modality: t1      # 注意大小写与文件夹一致（T1/T2/FLAIR/T1CE）

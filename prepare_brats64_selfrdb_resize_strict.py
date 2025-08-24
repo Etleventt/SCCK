@@ -132,11 +132,13 @@ def center_pad_to_square(x: np.ndarray) -> np.ndarray:
 
 
 def pil_resize_float01(x01: np.ndarray, size: int) -> np.ndarray:
-    """Resize float [0,1] image using bicubic via PIL (mode 'F')."""
     x01 = np.clip(x01, 0.0, 1.0).astype(np.float32)
     pil = Image.fromarray(x01, mode="F")
     pil = pil.resize((size, size), Image.BICUBIC)
-    return np.asarray(pil, dtype=np.float32)
+    out = np.asarray(pil, dtype=np.float32)
+    out = np.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0)
+    return np.clip(out, 0.0, 1.0)
+
 
 
 def pil_resize_mask(mask: np.ndarray, size: int) -> np.ndarray:
@@ -391,6 +393,7 @@ def main():
                     x01 = np.clip((x - lo) / (hi - lo + 1e-6), 0.0, 1.0)
                     x01 = pil_resize_float01(x01, args.export_size)
                     x01 = (x01 * m_low.astype(np.float32)).astype(np.float32)
+                    x01 = np.clip(x01, 0.0, 1.0)   # ★ 最终兜底
                     safe_np_save(args.out_root / m / sp / f"slice_{counters[sp]}.npy", x01)
 
                 safe_np_save(args.out_root / "mask" / sp / f"slice_{counters[sp]}.npy", m_low.astype(np.uint8))

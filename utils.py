@@ -207,121 +207,104 @@ def save_preds(preds, path):
     np.save(path, preds)
 
 
-# -----------------------------
-# Metric computation (kept the same)
-# -----------------------------
 def compute_metrics(
     gt_images,
-    pred_images, 
+    pred_images,
     mask=None,
-    norm='mean',
+    norm=None,                 # 评测阶段不做 per-slice 归一化；保留参数但不使用
     subject_ids=None,
-    report_path=None
+    report_path=None,
+    min_valid_pixels=64,
+    eps_range=1e-6
 ):
-    """ Compute PSNR and SSIM between gt_images and pred_images. """
+    import warnings
+    import numpy as np
+    from skimage.metrics import peak_signal_noise_ratio as _psnr
+    from skimage.metrics import structural_similarity as _ssim
+    import torch
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
-        # If images 4-dimensional, squeeze channel dimension
-        gt_images = gt_images.squeeze() if gt_images.ndim == 4 else gt_images
+
+        # squeeze 到 [N,H,W]
+        gt_images   = gt_images.squeeze() if gt_images.ndim == 4 else gt_images
         pred_images = pred_images.squeeze() if pred_images.ndim == 4 else pred_images
-
-        # If images 2-dimensional, add channel dimension
-        gt_images = gt_images[None, ...] if gt_images.ndim == 2 else gt_images
+        gt_images   = gt_images[None, ...]   if gt_images.ndim == 2   else gt_images
         pred_images = pred_images[None, ...] if pred_images.ndim == 2 else pred_images
+        assert gt_images.shape == pred_images.shape, "GT 和 Pred 形状必须一致"
 
-        assert gt_images.shape == pred_images.shape, \
-            "Ground truth and predicted images must have the same shape"
-        
-        # Normalize function
-        if norm == 'mean':
-            norm_func = mean_norm
-        elif norm == '01':
-            norm_func = norm_01
-        else:
-            norm_func = mean_norm
+        # to numpy + [-1,1] -> [0,1]
+        if isinstance(gt_images, torch.Tensor):   gt_images = gt_images.cpu().numpy()
+        if isinstance(pred_images, torch.Tensor): pred_images = pred_images.cpu().numpy()
+        if np.nanmin(gt_images)   < -0.1: gt_images   = ((gt_images   + 1) / 2).clip(0, 1)
+        if np.nanmin(pred_images) < -0.1: pred_images = ((pred_images + 1) / 2).clip(0, 1)
+        gt_images   = np.clip(gt_images,   0.0, 1.0).astype(np.float32)
+        pred_images = np.clip(pred_images, 0.0, 1.0).astype(np.float32)
 
-        # If torch tensor, convert to numpy
-        if isinstance(gt_images, torch.Tensor):
-            gt_images = gt_images.cpu().numpy()
-        if isinstance(pred_images, torch.Tensor):
-            pred_images = pred_images.cpu().numpy()
+        N, H, W = gt_images.shape[0], gt_images.shape[-2], gt_images.shape[-1]
 
-        # If images between [-1, 1], scale to [0, 1]
-        if np.nanmin(gt_images) < -0.1:
-            gt_images = ((gt_images + 1) / 2).clip(0, 1)
-        if np.nanmin(pred_images) < -0.1:
-            pred_images = ((pred_images + 1) / 2).clip(0, 1)
-
-        # Apply mask and normalize
+        # 处理 mask -> [N,H,W] 的 bool（只乘，不再归一化/裁剪）
         if mask is not None:
-            gt_images = center_crop(gt_images, mask.shape[-2:])
-            pred_images = center_crop(pred_images, mask.shape[-2:])
-
-            gt_images = apply_mask_and_norm(gt_images, mask, norm_func)
-            pred_images = apply_mask_and_norm(pred_images, mask, norm_func)
+            if isinstance(mask, torch.Tensor): mask = mask.cpu().numpy()
+            if mask.ndim == 2:
+                mask = np.broadcast_to(mask[None, ...], (N, H, W))
+            elif mask.ndim == 3 and mask.shape[-2:] != (H, W):
+                mh, mw = mask.shape[-2:]
+                y0 = max(0, mh//2 - H//2); x0 = max(0, mw//2 - W//2)
+                mask = mask[:, y0:y0+H, x0:x0+W]
+            mask = (mask > 0)
+            gt_images   = gt_images * mask
+            pred_images = pred_images * mask
         else:
-            gt_images = norm_func(gt_images)
-            pred_images = norm_func(pred_images)
+            mask = np.ones((N, H, W), dtype=bool)
 
-        # Compute psnr and ssim
         psnr_values, ssim_values = [], []
-        for gt, pred in zip(gt_images, pred_images):
-            gt = gt.squeeze()
-            pred = pred.squeeze()
-            # 与原逻辑一致：data_range=gt.max()
-            psnr_value = psnr(gt, pred, data_range=gt.max())
-            ssim_value = ssim(gt, pred, data_range=gt.max()) * 100
-            psnr_values.append(psnr_value)
-            ssim_values.append(ssim_value)
+        valid_ids = []
 
-        psnr_values = np.asarray(psnr_values)
-        ssim_values = np.asarray(ssim_values)
+        for i in range(N):
+            gt  = gt_images[i]
+            prd = pred_images[i]
+            m   = mask[i]
 
-        # Subject-level reports (unchanged)
-        subject_reports = {}
-        if subject_ids is not None:
-            for i in np.unique(subject_ids):
-                idx = np.where(subject_ids == i)[0]
-                subject_report = {
-                    'psnrs': psnr_values[idx],
-                    'ssims': ssim_values[idx],
-                    'psnr_mean': np.nanmean(psnr_values[idx]),
-                    'ssim_mean': np.nanmean(ssim_values[idx]),
-                    'psnr_std': np.nanstd(psnr_values[idx]),
-                    'ssim_std': np.nanstd(ssim_values[idx])
-                }
-                subject_reports[i] = subject_report
+            # 有效像素太少 -> 跳过
+            if int(m.sum()) < min_valid_pixels:
+                continue
 
-        # Mean/std (unchanged)
-        if subject_ids is not None:
-            psnr_mean = np.nanmean([r['psnr_mean'] for r in subject_reports.values()])
-            ssim_mean = np.nanmean([r['ssim_mean'] for r in subject_reports.values()])
-            psnr_std  = np.nanstd ([r['psnr_mean'] for r in subject_reports.values()])
-            ssim_std  = np.nanstd ([r['ssim_mean'] for r in subject_reports.values()])
-        else:
-            psnr_mean = np.nanmean(psnr_values)
-            ssim_mean = np.nanmean(ssim_values)
-            psnr_std  = np.nanstd(psnr_values)
-            ssim_std  = np.nanstd(ssim_values)
-        
+            # 官方风格的 data_range：取 gt.max()（注意不是 1.0）
+            dr = float(gt.max())  # 之前你们就是这么传的
+            if dr < eps_range:
+                # 动态范围≈0，官方会导致 -inf/NaN；这里直接跳过该切片
+                continue
+
+            # ----- PSNR -----
+            psnr_val = _psnr(gt, prd, data_range=dr)
+            # ----- SSIM -----
+            ssim_val = _ssim(gt, prd, data_range=dr) * 100.0
+
+            if np.isfinite(psnr_val) and np.isfinite(ssim_val):
+                psnr_values.append(psnr_val)
+                ssim_values.append(ssim_val)
+                valid_ids.append(i)
+
+        psnr_values = np.asarray(psnr_values, dtype=np.float64)
+        ssim_values = np.asarray(ssim_values, dtype=np.float64)
+
+        psnr_mean = float(np.mean(psnr_values)) if psnr_values.size else float('nan')
+        psnr_std  = float(np.std (psnr_values)) if psnr_values.size else float('nan')
+        ssim_mean = float(np.mean(ssim_values)) if ssim_values.size else float('nan')
+        ssim_std  = float(np.std (ssim_values)) if ssim_values.size else float('nan')
+
         if report_path is not None:
+            skipped = N - len(valid_ids)
             with open(report_path, 'w') as f:
                 f.write(f'PSNR: {psnr_mean:.2f} ± {psnr_std:.2f}\n')
                 f.write(f'SSIM: {ssim_mean:.2f} ± {ssim_std:.2f}\n')
-                f.write('\n')
-                if subject_ids is not None:
-                    for subject_id, report in subject_reports.items():
-                        f.write(f'Subject {subject_id}\n')
-                        f.write(f'PSNR: {report["psnr_mean"]:.2f} ± {report["psnr_std"]:.2f}\n')
-                        f.write(f'SSIM: {report["ssim_mean"]:.2f} ± {report["ssim_std"]:.2f}\n')
-                        f.write('\n')
+                f.write(f'Valid/Total slices: {len(valid_ids)}/{N} (skipped={skipped})\n')
 
         return {
-            'psnr_mean': psnr_mean,
-            'ssim_mean': ssim_mean,
-            'psnr_std': psnr_std,
-            'ssim_std': ssim_std,
-            'psnrs': psnr_values,
-            'ssims': ssim_values,
-            'subject_reports': subject_reports
+            'psnr_mean': psnr_mean, 'psnr_std': psnr_std,
+            'ssim_mean': ssim_mean, 'ssim_std': ssim_std,
+            'psnrs': psnr_values, 'ssims': ssim_values,
+            'subject_reports': {}
         }
+        

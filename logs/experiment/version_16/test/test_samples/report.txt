@@ -1,3 +1,3 @@
-PSNR: -inf ± nan
-SSIM: 94.78 ± 4.00
-
+PSNR: 26.93 ± 3.40
+SSIM: 94.14 ± 4.47
+Valid/Total slices: 10240/10488 (skipped=248)

@@ -53,7 +53,7 @@ lambda_rec_loss: 0.5
 optim_betas:
 - 0.5
 - 0.9
-eval_mask: false
+eval_mask: true
 eval_subject: true
 _instantiator: lightning.pytorch.cli.instantiate_module
 dataset_dir: /home/xiaobin/Projects/SelfRDB/dataset/brats64_selfrdb_clean_copy_withmask
@@ -65,5 +65,5 @@ padding: false
 norm: true
 train_batch_size: 100
 val_batch_size: 64
-test_batch_size: 700
+test_batch_size: 1500
 num_workers: 8

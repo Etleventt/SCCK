@@ -9,11 +9,11 @@ Quick QC for SelfRDB-style NumpyDataset (BraTS slices)
 
 Usage example:
   python qc_numpy_dataset.py \
-    --root /home/xiaobin/Projects/SelfRDB/dataset/brats64_selfrdb \
+    --root /home/xiaobin/Projects/SelfRDB/dataset/brats64_selfrdb_clean_copy_withmask \
     --modalities t1,t2,t1ce,flair \
     --splits train,val,test \
     --n 8 --thr 1e-4 --max_stats 2000 \
-    --out /home/xiaobin/Projects/SelfRDB/qc_brats64_selfrdb
+    --out /home/xiaobin/Projects/SelfRDB/qc_brats64_selfrdb_clean_copy_withmask
 """
 import argparse, json, os, re, random, time
 from pathlib import Path
