@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+"""
+python rebuild_masks_from_t1.py   --root /home/xiaobin/Projects/SelfRDB/dataset/brats64_selfrdb_clean_copy   --out_root /home/xiaobin/Projects/SelfRDB/dataset/brats64_selfrdb_clean_copy   --splits train val test   --thr 1e-4 --close_iters 1
+"""
 import argparse, json
 from pathlib import Path
 import numpy as np

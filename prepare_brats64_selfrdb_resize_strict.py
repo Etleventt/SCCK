@@ -47,6 +47,21 @@ Notes
   between slices and prevents black outputs.
 
 Tested with: Python 3.10, nibabel, numpy, pillow, tqdm, matplotlib
+
+
+python prepare_brats64_selfrdb_resize_strict.py \
+  --root /home/xiaobin/Projects/DBAE/data/raw/brats \
+  --out_root /home/xiaobin/Projects/SelfRDB/dataset/brats64_selfrdb \
+  --modalities t1,t2,t1ce,flair \
+  --ref_mod t1 \
+  --split 0.8 0.1 0.1 \
+  --z_lo 0.15 --z_hi 0.95 \
+  --q_lo 0.5 --q_hi 99.5 \
+  --export_size 64 \
+  --preview_split val --preview_n 16 --preview_out /home/xiaobin/Projects/SelfRDB/preview_64 \
+  --ranges_cache /home/xiaobin/Projects/SelfRDB/dataset/brats64_selfrdb/ranges_cache.json \
+  --stop_after_preview 0
+
 """
 
 from __future__ import annotations
