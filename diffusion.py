@@ -3,6 +3,9 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import lightning as L
+import os
+from anderson import anderson_accel
+
 
 
 class DiffusionBridge(L.LightningModule):
@@ -88,20 +91,38 @@ class DiffusionBridge(L.LightningModule):
         # Sample x_T
         x_t = self.q_sample(timesteps[0], torch.zeros_like(y), y)
 
-        # Predict x0 via recursive reverse process
+        use_aa = os.getenv("SELFRDB_ANDERSON", "0") == "1"
+        aa_m = int(os.getenv("SELFRDB_AA_M", "3"))
+        aa_lam = float(os.getenv("SELFRDB_AA_LAM", "1e-4"))
+        aa_damp = float(os.getenv("SELFRDB_AA_DAMP", "1.0"))
+
         for t in timesteps:
-            x0_r = torch.zeros_like(x_t)
-            for _ in range(self.n_recursions):
-                x0_rp1 = generator(torch.cat((x_t, y), axis=1), t, x_r=x0_r)
+            if use_aa:
+                # Anderson on the inner recursion: x_r -> F(x_r)
+                def F(x_r):
+                    return generator(torch.cat((x_t, y), axis=1), t, x_r=x_r)
+                x0_pred = anderson_accel(
+                    F, torch.zeros_like(x_t),
+                    m=aa_m, lam=aa_lam,
+                    damping=aa_damp if aa_damp is not None else 0.2,
+                    K=self.n_recursions,
+                    tol=None,                 # 评测期：让 AA 真正走满 K 步
+                    safeguard=True            # 关键：保序护栏
+                )
 
-                # Change in l1-norm
-                change = torch.abs(x0_rp1 - x0_r).mean(axis=0).max()
-                if change < self.consistency_threshold:
-                    break
+            else:
+                # 原始自一致递归 + 早停
+                x0_r = torch.zeros_like(x_t)
+                for _ in range(self.n_recursions):
+                    x0_rp1 = generator(torch.cat((x_t, y), axis=1), t, x_r=x0_r)
+                    change = torch.abs(x0_rp1 - x0_r).mean(axis=0).max()
+                    if change < self.consistency_threshold:
+                        x0_r = x0_rp1
+                        break
+                    x0_r = x0_rp1
+                x0_pred = x0_r
 
-                x0_r = x0_rp1
-
-            x0_pred = x0_r 
+            # Posterior sampling q(x_{t-1} | x_t, y, x0_pred)
             x_tm1_pred = self.q_posterior(t, x_t, x0_pred, y)
             x_t = x_tm1_pred
 

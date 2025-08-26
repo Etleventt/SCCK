@@ -14,6 +14,8 @@ from backbones.discriminator import Discriminator_large
 from datasets import DataModule
 from utils import compute_metrics, save_image_pair, save_preds, save_eval_images
 # import torch; torch.set_float32_matmul_precision('high')
+from anderson import anderson_accel
+import os
 
 
 class BridgeRunner(L.LightningModule):
@@ -51,6 +53,12 @@ class BridgeRunner(L.LightningModule):
 
         # Configure diffusion
         self.diffusion = DiffusionBridge(**diffusion_params)
+        
+        self.use_aa_train = os.getenv("SELFRDB_ANDERSON_TRAIN", "0") == "1"
+        self.aa_m    = int(os.getenv("SELFRDB_AA_M", "3"))
+        self.aa_lam  = float(os.getenv("SELFRDB_AA_LAM", "1e-4"))
+        self.aa_damp = float(os.getenv("SELFRDB_AA_DAMP", "1.0"))
+
 
     def training_step(self, batch):
         x0, y, _ = batch
@@ -84,10 +92,17 @@ class BridgeRunner(L.LightningModule):
 
         # Part 1.b: Train discriminator with fake data
         # Perform recursive x0 prediction
-        x0_r = torch.zeros_like(x_t)
-        for _ in range(self.n_recursions):
-            x0_r = self.generator(torch.cat((x_t.detach(), y), axis=1), t, x_r=x0_r)
-        x0_pred = x0_r
+        if self.use_aa_train:
+            def F(x_r):
+                return self.generator(torch.cat((x_t.detach(), y), axis=1), t, x_r=x_r)
+            x0_pred = anderson_accel(F, torch.zeros_like(x_t),
+                                    m=self.aa_m, lam=self.aa_lam, damping=self.aa_damp,
+                                    K=self.n_recursions, tol=None)   # 训练端不早停
+        else:
+            x0_r = torch.zeros_like(x_t)
+            for _ in range(self.n_recursions):
+                x0_r = self.generator(torch.cat((x_t.detach(), y), axis=1), t, x_r=x0_r)
+            x0_pred = x0_r
 
         # Posterior sampling q(x_{t-1} | x_t, y, x0_pred)
         x_tm1_pred = self.diffusion.q_posterior(t, x_t, x0_pred, y)
@@ -119,10 +134,17 @@ class BridgeRunner(L.LightningModule):
         x_t = self.diffusion.q_sample(t, x0, y)
 
         # Perform recursive x0 prediction
-        x0_r = torch.zeros_like(x_t)
-        for _ in range(self.n_recursions):
-            x0_r = self.generator(torch.cat((x_t.detach(), y), axis=1), t, x_r=x0_r)
-        x0_pred = x0_r
+        if self.use_aa_train:
+            def F(x_r):
+                return self.generator(torch.cat((x_t.detach(), y), axis=1), t, x_r=x_r)
+            x0_pred = anderson_accel(F, torch.zeros_like(x_t),
+                                    m=self.aa_m, lam=self.aa_lam, damping=self.aa_damp,
+                                    K=self.n_recursions, tol=None)
+        else:
+            x0_r = torch.zeros_like(x_t)
+            for _ in range(self.n_recursions):
+                x0_r = self.generator(torch.cat((x_t.detach(), y), axis=1), t, x_r=x0_r)
+            x0_pred = x0_r
 
         # Posterior sampling q(x_{t-1} | x_t, y, x0_pred)
         x_tm1_pred = self.diffusion.q_posterior(t, x_t, x0_pred, y)
