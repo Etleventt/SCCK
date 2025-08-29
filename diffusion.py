@@ -1,11 +1,9 @@
-
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import lightning as L
 import os
 from anderson import anderson_accel
-
 
 
 class DiffusionBridge(L.LightningModule):
@@ -55,7 +53,6 @@ class DiffusionBridge(L.LightningModule):
         std = self.std[t].view(shape)
 
         x_t = mu_x0*x0 + mu_y*y + std*torch.randn_like(x0)
-        
         return x_t.detach()
 
     def q_posterior(self, t, x_t, x0, y):
@@ -78,51 +75,65 @@ class DiffusionBridge(L.LightningModule):
             ((var_tm1 - v) / var_t).sqrt() * (x_t - mu_x0_t * x0 - mu_y_t * y)
 
         x_tm1 = x_tm1_mean + v.sqrt() * torch.randn_like(x_t)
-
         return x_tm1
 
     @torch.inference_mode()
-    def sample_x0(self, y, generator):
-        """ Sample p(x_0 | y) """
-        # Set timesteps
+    def sample_x0(self, y, generator, anderson=None):
+        """
+        Sample p(x_0 | y).
+        - 如果 anderson 是一个 dict（来自 YAML 的 model.anderson），则优先生效；
+          否则回退到环境变量 SELFRDB_ANDERSON 等；都没有则走基线递归。
+        """
+        # 设置时间步（降序）
         timesteps = torch.arange(self.n_steps, 0, -1, device=y.device)
-        timesteps = timesteps.unsqueeze(1).repeat(1, y.shape[0])
+        timesteps = timesteps.unsqueeze(1).repeat(1, y.shape[0])  # [n_steps, B]
 
-        # Sample x_T
+        # 采样 x_T
         x_t = self.q_sample(timesteps[0], torch.zeros_like(y), y)
 
-        use_aa = os.getenv("SELFRDB_ANDERSON", "0") == "1"
-        aa_m = int(os.getenv("SELFRDB_AA_M", "3"))
-        aa_lam = float(os.getenv("SELFRDB_AA_LAM", "1e-4"))
-        aa_damp = float(os.getenv("SELFRDB_AA_DAMP", "1.0"))
+        # 解析 Anderson 配置（YAML 优先，其次环境变量）
+        if isinstance(anderson, dict):
+            use_aa = bool(anderson.get("enabled", False))
+            aa_m = int(anderson.get("m", 3))
+            aa_lam = float(anderson.get("lam", 1e-3))
+            aa_damp = float(anderson.get("damping", 0.2))
+            aa_tol = anderson.get("tol", None)
+            aa_safe = bool(anderson.get("safeguard", True))
+        else:
+            use_aa = os.getenv("SELFRDB_ANDERSON", "0") == "1"
+            aa_m = int(os.getenv("SELFRDB_AA_M", "3"))
+            aa_lam = float(os.getenv("SELFRDB_AA_LAM", "1e-3"))
+            aa_damp = float(os.getenv("SELFRDB_AA_DAMP", "0.2"))
+            aa_tol = None
+            aa_safe = True
 
         for t in timesteps:
             if use_aa:
-                # Anderson on the inner recursion: x_r -> F(x_r)
+                # Anderson 加速：对步内递归 x_r -> F(x_r)
                 def F(x_r):
-                    return generator(torch.cat((x_t, y), axis=1), t, x_r=x_r)
+                    return generator(torch.cat((x_t, y), dim=1), t, x_r=x_r)
                 x0_pred = anderson_accel(
                     F, torch.zeros_like(x_t),
                     m=aa_m, lam=aa_lam,
                     damping=aa_damp if aa_damp is not None else 0.2,
                     K=self.n_recursions,
-                    tol=None,                 # 评测期：让 AA 真正走满 K 步
-                    safeguard=True            # 关键：保序护栏
+                    tol=aa_tol,               # 推理期通常 None：走满 K
+                    safeguard=aa_safe         # 保序护栏
                 )
-
             else:
-                # 原始自一致递归 + 早停
+                # 基线：原始自一致递归 + 早停（阈值为 0 则基本走满 K）
                 x0_r = torch.zeros_like(x_t)
                 for _ in range(self.n_recursions):
-                    x0_rp1 = generator(torch.cat((x_t, y), axis=1), t, x_r=x0_r)
-                    change = torch.abs(x0_rp1 - x0_r).mean(axis=0).max()
-                    if change < self.consistency_threshold:
+                    x0_rp1 = generator(torch.cat((x_t, y), dim=1), t, x_r=x0_r)
+                    # 标量化 change，避免分布式/不同维度导致的比较问题
+                    change = (x0_rp1 - x0_r).abs().mean().item()
+                    if change < float(self.consistency_threshold):
                         x0_r = x0_rp1
                         break
                     x0_r = x0_rp1
                 x0_pred = x0_r
 
-            # Posterior sampling q(x_{t-1} | x_t, y, x0_pred)
+            # 后验采样 q(x_{t-1} | x_t, y, x0_pred)
             x_tm1_pred = self.q_posterior(t, x_t, x0_pred, y)
             x_t = x_tm1_pred
 
@@ -142,13 +153,11 @@ class DiffusionBridge(L.LightningModule):
                 [betas[betas_len//2]],
                 np.flip(betas[:betas_len//2])
             ])
-        
         else:
             betas = np.concatenate([
                 betas[:betas_len//2],
                 np.flip(betas[:betas_len//2])
             ])
-
         return betas
 
     @staticmethod
@@ -161,9 +170,8 @@ class DiffusionBridge(L.LightningModule):
     
     def vis_scheduler(self):
         plt.figure(figsize=(6, 3))
-        plt.plot(self.std**2, label=r'$\sigma_t^2$', color='#3467eb')
-        plt.plot(self.mu_x0, label=r'$\mu_{x_0}$', color='#6cd4a2')
-        plt.plot(self.mu_y, label=r'$\mu_{y}$', color='#d46c7d')
-
+        plt.plot(self.std**2, label=r'$\sigma_t^2$')
+        plt.plot(self.mu_x0, label=r'$\mu_{x_0}$')
+        plt.plot(self.mu_y, label=r'$\mu_{y}$')
         plt.legend()
         plt.show()

@@ -13,9 +13,7 @@ from backbones.ncsnpp import NCSNpp
 from backbones.discriminator import Discriminator_large
 from datasets import DataModule
 from utils import compute_metrics, save_image_pair, save_preds, save_eval_images
-# import torch; torch.set_float32_matmul_precision('high')
 from anderson import anderson_accel
-import os
 
 
 class BridgeRunner(L.LightningModule):
@@ -32,6 +30,7 @@ class BridgeRunner(L.LightningModule):
         optim_betas,
         eval_mask,
         eval_subject,
+        anderson=None,   # ★ 新增：接受 YAML 的 model.anderson 块
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -53,13 +52,19 @@ class BridgeRunner(L.LightningModule):
 
         # Configure diffusion
         self.diffusion = DiffusionBridge(**diffusion_params)
-        
+
+        # 保存 YAML 的 anderson 配置（验证/测试时传入）
+        self.anderson_cfg = anderson if isinstance(anderson, dict) else None
+
+        # 训练端是否启用 AA（保持你原先的环境变量开关）
         self.use_aa_train = os.getenv("SELFRDB_ANDERSON_TRAIN", "0") == "1"
         self.aa_m    = int(os.getenv("SELFRDB_AA_M", "3"))
-        self.aa_lam  = float(os.getenv("SELFRDB_AA_LAM", "1e-4"))
-        self.aa_damp = float(os.getenv("SELFRDB_AA_DAMP", "1.0"))
+        self.aa_lam  = float(os.getenv("SELFRDB_AA_LAM", "1e-3"))
+        self.aa_damp = float(os.getenv("SELFRDB_AA_DAMP", "0.2"))
 
-
+    # --------------------
+    # Training
+    # --------------------
     def training_step(self, batch):
         x0, y, _ = batch
         
@@ -69,56 +74,45 @@ class BridgeRunner(L.LightningModule):
         # Part 1: Train discriminator
         self.toggle_optimizer(optimizer_d)
 
-        # Part 1.a: Train discriminator with real data
-        # Sample a time step
-        t = torch.randint(1, self.n_steps+1, (x0.shape[0],)).to(x0.device)
-
-        # Sample x_{t-1} and x_t via forward process
+        # 1.a Real
+        t = torch.randint(1, self.n_steps+1, (x0.shape[0],), device=x0.device)
         x_tm1 = self.diffusion.q_sample(t - 1, x0, y)
         x_t = self.diffusion.q_sample(t, x0, y)
         x_t.requires_grad = True
 
-        # Perform real data prediction
         disc_out = self.discriminator(x_tm1, x_t, t)
         real_loss = self.adversarial_loss(disc_out, is_real=True)
         disc_real_acc = (disc_out > 0).float().mean()
 
-        # Compute gradient penalty
         if self.global_step % self.disc_grad_penalty_freq == 0:
             grads = torch.autograd.grad(outputs=disc_out.sum(), inputs=x_t, create_graph=True)[0]
             grad_penalty = (grads.view(grads.size(0), -1).norm(2, dim=1) ** 2).mean()
             grad_penalty = grad_penalty * self.disc_grad_penalty_weight
             real_loss += grad_penalty
 
-        # Part 1.b: Train discriminator with fake data
-        # Perform recursive x0 prediction
+        # 1.b Fake
         if self.use_aa_train:
-            def F(x_r):
-                return self.generator(torch.cat((x_t.detach(), y), axis=1), t, x_r=x_r)
-            x0_pred = anderson_accel(F, torch.zeros_like(x_t),
-                                    m=self.aa_m, lam=self.aa_lam, damping=self.aa_damp,
-                                    K=self.n_recursions, tol=None)   # 训练端不早停
+            def F_step(x_r):
+                return self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x_r)
+            x0_pred = anderson_accel(
+                F_step, torch.zeros_like(x_t),
+                m=self.aa_m, lam=self.aa_lam, damping=self.aa_damp,
+                K=self.n_recursions, tol=None  # 训练端不早停
+            )
         else:
             x0_r = torch.zeros_like(x_t)
             for _ in range(self.n_recursions):
-                x0_r = self.generator(torch.cat((x_t.detach(), y), axis=1), t, x_r=x0_r)
+                x0_r = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x0_r)
             x0_pred = x0_r
 
-        # Posterior sampling q(x_{t-1} | x_t, y, x0_pred)
         x_tm1_pred = self.diffusion.q_posterior(t, x_t, x0_pred, y)
-
-        # Perform fake data prediction
         disc_out = self.discriminator(x_tm1_pred, x_t, t)
         fake_loss = self.adversarial_loss(disc_out, is_real=False)
         disc_fake_acc = (disc_out < 0).float().mean()
 
-        # Compute discriminator accuracy
         d_acc = (disc_real_acc + disc_fake_acc) / 2
-
-        # Compute total loss
         d_loss = real_loss + fake_loss
 
-        # Perform backprop
         self.manual_backward(d_loss)
         optimizer_d.step()
         optimizer_d.zero_grad()
@@ -127,74 +121,64 @@ class BridgeRunner(L.LightningModule):
         # Part 2: Train generator
         self.toggle_optimizer(optimizer_g)
 
-        # Sample a time step
-        t = torch.randint(1, self.n_steps+1, (x0.shape[0],)).to(x0.device)
-
-        # Get x_t via forward process
+        t = torch.randint(1, self.n_steps+1, (x0.shape[0],), device=x0.device)
         x_t = self.diffusion.q_sample(t, x0, y)
 
-        # Perform recursive x0 prediction
         if self.use_aa_train:
-            def F(x_r):
-                return self.generator(torch.cat((x_t.detach(), y), axis=1), t, x_r=x_r)
-            x0_pred = anderson_accel(F, torch.zeros_like(x_t),
-                                    m=self.aa_m, lam=self.aa_lam, damping=self.aa_damp,
-                                    K=self.n_recursions, tol=None)
+            def F_step(x_r):
+                return self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x_r)
+            x0_pred = anderson_accel(
+                F_step, torch.zeros_like(x_t),
+                m=self.aa_m, lam=self.aa_lam, damping=self.aa_damp,
+                K=self.n_recursions, tol=None
+            )
         else:
             x0_r = torch.zeros_like(x_t)
             for _ in range(self.n_recursions):
-                x0_r = self.generator(torch.cat((x_t.detach(), y), axis=1), t, x_r=x0_r)
+                x0_r = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x0_r)
             x0_pred = x0_r
 
-        # Posterior sampling q(x_{t-1} | x_t, y, x0_pred)
         x_tm1_pred = self.diffusion.q_posterior(t, x_t, x0_pred, y)
 
-        # Compute reconstruction loss
         rec_loss = F.l1_loss(x0_pred, x0, reduction="sum")
-
-        # Compute adversarial loss
-        adv_loss = self.adversarial_loss(
-            self.discriminator(x_tm1_pred, x_t, t), is_real=True)
-        
-        # Compute total loss and perform backprop
+        adv_loss = self.adversarial_loss(self.discriminator(x_tm1_pred, x_t, t), is_real=True)
         g_loss = self.lambda_rec_loss*rec_loss + adv_loss
 
-        # Perform backprop
         self.manual_backward(g_loss)
-
         optimizer_g.step()
         optimizer_g.zero_grad()
         self.untoggle_optimizer(optimizer_g)
 
-        # Take lr scheduler step
         scheduler_g.step()
         scheduler_d.step()
         
-        # Log losses
         self.log("d_loss", d_loss, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("g_loss/rec", rec_loss, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("g_loss/adv", adv_loss, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("g_loss/total", g_loss, on_epoch=True, prog_bar=True, sync_dist=True)
-        
+
+    # --------------------
+    # Validation
+    # --------------------
     def validation_step(self, batch, batch_idx):
         x0, y, _ = batch
-
-        # Predict x0
-        x0_pred = self.diffusion.sample_x0(y, self.generator)
+        # 推理：把 YAML 的 anderson 配置传进去（若为 None 则回退到 env/基线）
+        x0_pred = self.diffusion.sample_x0(y, self.generator, anderson=self.anderson_cfg)
 
         loss = F.mse_loss(x0_pred, x0)
         metrics = compute_metrics(x0, x0_pred)
 
-        # Log metrics
         self.log("val_loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("val_psnr", metrics["psnr_mean"].mean(), on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("val_ssim", metrics["ssim_mean"].mean(), on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("val_psnr", metrics["psnr_mean"], on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("val_ssim", metrics["ssim_mean"], on_epoch=True, prog_bar=True, sync_dist=True)
 
-        # Log sample images
         if batch_idx == 0 and self.global_rank == 0:
             path = os.path.join(self.logger.log_dir, "val_samples", f"epoch_{self.current_epoch}.png")
             save_image_pair(x0, x0_pred, path)
 
+    # --------------------
+    # Test
+    # --------------------
     def on_test_start(self):
         self.test_samples = []
         self.psnrs = []
@@ -202,21 +186,16 @@ class BridgeRunner(L.LightningModule):
         self.mask = None
         self.subject_ids = None
 
-        # Load mask for evaluation
         if self.eval_mask:
             self.mask = self.trainer.datamodule.test_dataset._load_data('mask')
 
-        # Load subject ids for evaluation
         if self.eval_subject:
             self.subject_ids = self.trainer.datamodule.test_dataset.subject_ids
 
     def test_step(self, batch, batch_idx):
         x0, y, slice_idx = batch
+        x0_pred = self.diffusion.sample_x0(y, self.generator, anderson=self.anderson_cfg)
 
-        # Predict x0
-        x0_pred = self.diffusion.sample_x0(y, self.generator)
-
-        # Gather pred images across all ranks
         all_pred = self.all_gather(x0_pred)
         slice_indices = self.all_gather(slice_idx)
         
@@ -225,31 +204,23 @@ class BridgeRunner(L.LightningModule):
             self.test_samples.extend(list(zip(
                 slice_indices.flatten().tolist(),
                 all_pred.reshape(-1, h, w).cpu().numpy())))
-        
+
     def on_test_end(self):
-        # Save predicted images
         if self.global_rank == 0:
-            # Sort samples by slice index
             self.test_samples.sort(key=lambda x: x[0])
-            
-            # Extract pred images
             pred = np.array([x[1] for x in self.test_samples])
             slice_indices = np.array([x[0] for x in self.test_samples])
 
-            # Remove repeated slices that can occur in multi-GPU setting
             _, locs = np.unique(slice_indices, return_index=True)
             pred = pred[locs]
 
-            # Get source and target images
             dataset = self.trainer.datamodule.test_dataset
             source = dataset.source
             target = dataset.target
 
-            # Save predictions
             path = os.path.join(self.logger.log_dir, "test_samples", "pred.npy")
             save_preds(pred, path)
 
-            # Compute metrics and save report
             metrics = compute_metrics(
                 gt_images=target,
                 pred_images=pred,
@@ -258,13 +229,10 @@ class BridgeRunner(L.LightningModule):
                 report_path=os.path.join(self.logger.log_dir, "test_samples", "report.txt")
             )
 
-            # Print metrics
             print(f"PSNR: {metrics['psnr_mean']:.2f} ± {metrics['psnr_std']:.2f}")
             print(f"SSIM: {metrics['ssim_mean']:.2f} ± {metrics['ssim_std']:.2f}")
 
-            # Save sample images
             indices = np.random.choice(len(dataset), 10)
-            path = os.path.join(self.logger.log_dir, "test_samples")
             save_eval_images(
                 source_images=source[indices],
                 target_images=target[indices],
@@ -274,6 +242,9 @@ class BridgeRunner(L.LightningModule):
                 save_path=os.path.join(self.logger.log_dir, "test_samples")
             )
 
+    # --------------------
+    # Misc
+    # --------------------
     def adversarial_loss(self, pred, is_real):
         loss = F.softplus(-pred) if is_real else F.softplus(pred)
         return loss.mean()
@@ -281,11 +252,8 @@ class BridgeRunner(L.LightningModule):
     def configure_optimizers(self):
         optimizer_g = Adam(self.generator.parameters(), lr=self.lr_g, betas=self.optim_betas)
         optimizer_d = Adam(self.discriminator.parameters(), lr=self.lr_d, betas=self.optim_betas)
-        
-        # Learning rate schedulers
         scheduler_g = CosineAnnealingLR(optimizer_g, T_max=self.trainer.max_epochs, eta_min=1e-5)
         scheduler_d = CosineAnnealingLR(optimizer_d, T_max=self.trainer.max_epochs, eta_min=1e-5)
-
         return [optimizer_g, optimizer_d], [scheduler_g, scheduler_d]
 
 
@@ -298,7 +266,6 @@ class _LightningCLI(LightningCLI):
             logger.init_args.save_dir = os.path.dirname(exp_dir)
             logger.init_args.name = os.path.basename(exp_dir)
             logger.init_args.version = "test"
-
         super().instantiate_classes()
 
 
