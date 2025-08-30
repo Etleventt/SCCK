@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import lightning as L
 import os
 from anderson import anderson_accel
+from fp_solvers import extrap_safe, picard, heun2, extrap
 
 
 class DiffusionBridge(L.LightningModule):
@@ -85,22 +86,32 @@ class DiffusionBridge(L.LightningModule):
           否则回退到环境变量 SELFRDB_ANDERSON 等；都没有则走基线递归。
         """
         # 设置时间步（降序）
+
         timesteps = torch.arange(self.n_steps, 0, -1, device=y.device)
         timesteps = timesteps.unsqueeze(1).repeat(1, y.shape[0])  # [n_steps, B]
 
         # 采样 x_T
         x_t = self.q_sample(timesteps[0], torch.zeros_like(y), y)
 
-        # 解析 Anderson 配置（YAML 优先，其次环境变量）
+        # 解析求解器配置（env 优先，若未设置则回退到 Anderson 或基线递归）
+        solver = os.getenv("SELFRDB_SOLVER", "").lower().strip()  # '', 'picard', 'heun2', 'extrap'
+
+        use_solver = solver in {"picard", "heun2", "extrap", "extrap_safe"}
+        m_steps = int(os.getenv("SELFRDB_SOLVER_STEPS", "1"))
+        heun_theta = float(os.getenv("SELFRDB_HEUN_THETA", "0.5"))
+        extr_gamma = float(os.getenv("SELFRDB_EXTRAP_GAMMA", "0.5"))
+        if self.global_rank == 0:
+            print(f"[InnerSolver] {solver} / m_steps={m_steps}")
+        # 解析 Anderson 配置（YAML 优先，其次环境变量），当未指定新求解器时生效
         if isinstance(anderson, dict):
-            use_aa = bool(anderson.get("enabled", False))
+            use_aa = (not use_solver) and bool(anderson.get("enabled", False))
             aa_m = int(anderson.get("m", 3))
             aa_lam = float(anderson.get("lam", 1e-3))
             aa_damp = float(anderson.get("damping", 0.2))
             aa_tol = anderson.get("tol", None)
             aa_safe = bool(anderson.get("safeguard", True))
         else:
-            use_aa = os.getenv("SELFRDB_ANDERSON", "0") == "1"
+            use_aa = (not use_solver) and (os.getenv("SELFRDB_ANDERSON", "0") == "1")
             aa_m = int(os.getenv("SELFRDB_AA_M", "3"))
             aa_lam = float(os.getenv("SELFRDB_AA_LAM", "1e-3"))
             aa_damp = float(os.getenv("SELFRDB_AA_DAMP", "0.2"))
@@ -108,7 +119,25 @@ class DiffusionBridge(L.LightningModule):
             aa_safe = True
 
         for t in timesteps:
-            if use_aa:
+            if use_solver:
+                # 数值求解器：对步内固定点 x -> F(x)
+                def F(x_r):
+                    return generator(torch.cat((x_t, y), dim=1), t, x_r=x_r)
+                x0_init = torch.zeros_like(x_t)
+                if solver == "picard":
+                    x0_pred = picard(F, x0_init, K=max(m_steps, 1), centered=True)
+                elif solver == "extrap":
+                    x0_pred = extrap(F, x0_init, M=max(m_steps, 1), gamma=extr_gamma, centered=True)
+                elif solver == "extrap_safe":
+                    gamma = float(os.getenv("SELFRDB_EXTRAP_GAMMA", "0.3"))
+                    maxbt = int(os.getenv("SELFRDB_EXTRAP_MAXBT", "3"))
+                    # 近似脑区：y in [-1,1]，背景≈-1；>-0.95 视为“非背景”
+                    mask = (y > -0.95).to(x_t.dtype)
+                    x0_pred = extrap_safe(F, x0_init, gamma=gamma, centered=True,
+                                        mask=mask, max_backtracks=maxbt, improve_ratio=0.05)
+                else:  # 'heun2' 默认
+                    x0_pred = heun2(F, x0_init, M=max(m_steps, 1), theta=heun_theta, centered=True)
+            elif use_aa:
                 # Anderson 加速：对步内递归 x_r -> F(x_r)
                 def F(x_r):
                     return generator(torch.cat((x_t, y), dim=1), t, x_r=x_r)
