@@ -31,6 +31,11 @@ class BridgeRunner(L.LightningModule):
         eval_mask,
         eval_subject,
         anderson=None,   # ★ 新增：接受 YAML 的 model.anderson 块
+        # --- SC / Drop-R 相关（可选，保持向后兼容） ---
+        use_standard_sc: bool = False,
+        sc_prob: float = 0.5,
+        sc_stop_grad: bool = True,
+        drop_r_prob: float = 0.0,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -62,6 +67,13 @@ class BridgeRunner(L.LightningModule):
         self.aa_lam  = float(os.getenv("SELFRDB_AA_LAM", "1e-3"))
         self.aa_damp = float(os.getenv("SELFRDB_AA_DAMP", "0.2"))
 
+        # 标准 SC 与 Drop-R（环境变量可覆盖传参，默认不启用）
+        env_use_sc = os.getenv("SELFRDB_USE_STANDARD_SC")
+        self.use_standard_sc = (env_use_sc == "1") if env_use_sc is not None else bool(use_standard_sc)
+        self.sc_prob = float(os.getenv("SELFRDB_SC_PROB", str(sc_prob)))
+        self.sc_stop_grad = (os.getenv("SELFRDB_SC_STOP_GRAD", "1" if sc_stop_grad else "0") == "1")
+        self.drop_r_prob = float(os.getenv("SELFRDB_DROP_R_PROB", str(drop_r_prob)))
+
     # --------------------
     # Training
     # --------------------
@@ -91,19 +103,31 @@ class BridgeRunner(L.LightningModule):
             real_loss += grad_penalty
 
         # 1.b Fake
-        if self.use_aa_train:
-            def F_step(x_r):
-                return self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x_r)
-            x0_pred = anderson_accel(
-                F_step, torch.zeros_like(x_t),
-                m=self.aa_m, lam=self.aa_lam, damping=self.aa_damp,
-                K=self.n_recursions, tol=None  # 训练端不早停
-            )
+        if self.use_standard_sc:
+            # 标准SC：同一 t 两次前向；第二次以 stop-grad 的第一次输出为 SC 通道，按概率置零
+            x0_hat1 = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=None)
+            sc_in = x0_hat1.detach() if self.sc_stop_grad else x0_hat1
+            if random() > self.sc_prob:
+                sc_in = None
+            x0_pred = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=sc_in)
         else:
-            x0_r = torch.zeros_like(x_t)
-            for _ in range(self.n_recursions):
-                x0_r = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x0_r)
-            x0_pred = x0_r
+            # Drop-R：以概率将步内递归从 n_recursions 减 1（至少为 1）
+            local_r = self.n_recursions
+            if local_r > 1 and self.drop_r_prob > 0.0 and random() < self.drop_r_prob:
+                local_r = max(1, local_r - 1)
+            if self.use_aa_train:
+                def F_step(x_r):
+                    return self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x_r)
+                x0_pred = anderson_accel(
+                    F_step, torch.zeros_like(x_t),
+                    m=self.aa_m, lam=self.aa_lam, damping=self.aa_damp,
+                    K=local_r, tol=None  # 训练端不早停
+                )
+            else:
+                x0_r = torch.zeros_like(x_t)
+                for _ in range(local_r):
+                    x0_r = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x0_r)
+                x0_pred = x0_r
 
         x_tm1_pred = self.diffusion.q_posterior(t, x_t, x0_pred, y)
         disc_out = self.discriminator(x_tm1_pred, x_t, t)
@@ -124,19 +148,29 @@ class BridgeRunner(L.LightningModule):
         t = torch.randint(1, self.n_steps+1, (x0.shape[0],), device=x0.device)
         x_t = self.diffusion.q_sample(t, x0, y)
 
-        if self.use_aa_train:
-            def F_step(x_r):
-                return self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x_r)
-            x0_pred = anderson_accel(
-                F_step, torch.zeros_like(x_t),
-                m=self.aa_m, lam=self.aa_lam, damping=self.aa_damp,
-                K=self.n_recursions, tol=None
-            )
+        if self.use_standard_sc:
+            x0_hat1 = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=None)
+            sc_in = x0_hat1.detach() if self.sc_stop_grad else x0_hat1
+            if random() > self.sc_prob:
+                sc_in = None
+            x0_pred = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=sc_in)
         else:
-            x0_r = torch.zeros_like(x_t)
-            for _ in range(self.n_recursions):
-                x0_r = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x0_r)
-            x0_pred = x0_r
+            local_r = self.n_recursions
+            if local_r > 1 and self.drop_r_prob > 0.0 and random() < self.drop_r_prob:
+                local_r = max(1, local_r - 1)
+            if self.use_aa_train:
+                def F_step(x_r):
+                    return self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x_r)
+                x0_pred = anderson_accel(
+                    F_step, torch.zeros_like(x_t),
+                    m=self.aa_m, lam=self.aa_lam, damping=self.aa_damp,
+                    K=local_r, tol=None
+                )
+            else:
+                x0_r = torch.zeros_like(x_t)
+                for _ in range(local_r):
+                    x0_r = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x0_r)
+                x0_pred = x0_r
 
         x_tm1_pred = self.diffusion.q_posterior(t, x_t, x0_pred, y)
 

@@ -82,8 +82,9 @@ class DiffusionBridge(L.LightningModule):
     def sample_x0(self, y, generator, anderson=None):
         """
         Sample p(x_0 | y).
-        - 如果 anderson 是一个 dict（来自 YAML 的 model.anderson），则优先生效；
-          否则回退到环境变量 SELFRDB_ANDERSON 等；都没有则走基线递归。
+        - 如果设置 SELFRDB_SC_INFER=1：启用“推理侧SC”，每个时间步只做一次前向，
+          用上一时间步的 x0 估计作为 x_r 传入生成器。
+        - 否则：若指定数值求解器/Anderson 则优先；否则走基线步内递归。
         """
         # 设置时间步（降序）
 
@@ -93,6 +94,16 @@ class DiffusionBridge(L.LightningModule):
         # 采样 x_T
         x_t = self.q_sample(timesteps[0], torch.zeros_like(y), y)
 
+        # 推理侧SC优先生效（跨时间步传递上一时刻 x0 作为 x_r）
+        if os.getenv("SELFRDB_SC_INFER", "0") == "1":
+            prev_x0 = None
+            for t in timesteps:
+                sc_in = None if prev_x0 is None else prev_x0
+                x0_pred = generator(torch.cat((x_t, y), dim=1), t, x_r=sc_in)
+                x_t = self.q_posterior(t, x_t, x0_pred, y)
+                prev_x0 = x0_pred.detach()
+            return x0_pred
+
         # 解析求解器配置（env 优先，若未设置则回退到 Anderson 或基线递归）
         solver = os.getenv("SELFRDB_SOLVER", "").lower().strip()  # '', 'picard', 'heun2', 'extrap'
 
@@ -100,7 +111,7 @@ class DiffusionBridge(L.LightningModule):
         m_steps = int(os.getenv("SELFRDB_SOLVER_STEPS", "1"))
         heun_theta = float(os.getenv("SELFRDB_HEUN_THETA", "0.5"))
         extr_gamma = float(os.getenv("SELFRDB_EXTRAP_GAMMA", "0.5"))
-        if self.global_rank == 0:
+        if self.global_rank == 0 and use_solver:
             print(f"[InnerSolver] {solver} / m_steps={m_steps}")
         # 解析 Anderson 配置（YAML 优先，其次环境变量），当未指定新求解器时生效
         if isinstance(anderson, dict):
