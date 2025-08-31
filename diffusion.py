@@ -120,6 +120,41 @@ class DiffusionBridge(L.LightningModule):
             ((var_tm1 - v) / var_t).sqrt() * (x_t - mu_x0_t * x0 - mu_y_t * y)
         return x_tm1_mean
 
+    def posterior_coeffs(self, t):
+        """
+        Return linear coefficients (a_t, b_t, c_t) such that
+        q_posterior_mean(t, x_t, x0, y) = a_t * x0 + b_t * y + c_t * x_t
+
+        t: LongTensor [B], values in [1..n_steps]
+        Returns 1D tensors of shape [B] (per-sample scalars).
+        """
+        std_t = self.s[t]
+        std_tm1 = self.s[t-1]
+        mu_x0_t = self.mu_x0[t]
+        mu_x0_tm1 = self.mu_x0[t-1]
+        mu_y_t = self.mu_y[t]
+        mu_y_tm1 = self.mu_y[t-1]
+
+        var_t = std_t**2
+        var_tm1 = std_tm1**2
+        var_t_tm1 = var_t - var_tm1 * (mu_x0_t / mu_x0_tm1)**2
+        v = var_t_tm1 * (var_tm1 / var_t)
+        alpha = ((var_tm1 - v) / var_t).sqrt()
+
+        a_t = mu_x0_tm1 - alpha * mu_x0_t
+        b_t = mu_y_tm1 - alpha * mu_y_t
+        c_t = alpha
+        return a_t, b_t, c_t
+
+    def q_posterior2_mean(self, t, x_t, x0_t, y):
+        """
+        Two-step direct mean to t-2 without re-estimating x0 at t-1:
+        returns E[x_{t-2} | x_t, x0 at t, y].
+        """
+        x_tm1_mean = self.q_posterior_mean(t, x_t, x0_t, y)
+        x_tm2_mean = self.q_posterior_mean(t-1, x_tm1_mean, x0_t, y)
+        return x_tm2_mean
+
     def forward_residual_normed(self, t, x_t, x0_hat, y):
         """
         Normalized forward residual for NLL/MSE:

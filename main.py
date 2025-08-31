@@ -36,6 +36,15 @@ class BridgeRunner(L.LightningModule):
         sc_prob: float = 0.5,
         sc_stop_grad: bool = True,
         drop_r_prob: float = 0.0,
+        # --- CK 跨步一致性（仅在无判别器分支启用） ---
+        lambda_ck: float = 0.0,
+        ck_prob: float = 0.5,
+        ck_time_norm: bool = True,
+        ck_detach_tm1: bool = True,
+        ck_shared_noise: bool = True,
+        ck_warmup_steps: int = 0,
+        ck_t_lo_frac: float = 0.0,
+        ck_t_hi_frac: float = 1.0,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -75,6 +84,16 @@ class BridgeRunner(L.LightningModule):
         self.sc_prob = float(os.getenv("SELFRDB_SC_PROB", str(sc_prob)))
         self.sc_stop_grad = (os.getenv("SELFRDB_SC_STOP_GRAD", "1" if sc_stop_grad else "0") == "1")
         self.drop_r_prob = float(os.getenv("SELFRDB_DROP_R_PROB", str(drop_r_prob)))
+
+        # CK 超参（默认关闭；仅在无判别器路径使用）
+        self.lambda_ck = float(os.getenv("SELFRDB_LAMBDA_CK", str(lambda_ck)))
+        self.ck_prob = float(os.getenv("SELFRDB_CK_PROB", str(ck_prob)))
+        self.ck_time_norm = (os.getenv("SELFRDB_CK_TIME_NORM", "1" if ck_time_norm else "0") == "1")
+        self.ck_detach_tm1 = (os.getenv("SELFRDB_CK_DETACH", "1" if ck_detach_tm1 else "0") == "1")
+        self.ck_shared_noise = (os.getenv("SELFRDB_CK_SHARED_NOISE", "1" if ck_shared_noise else "0") == "1")
+        self.ck_warmup_steps = int(os.getenv("SELFRDB_CK_WARMUP", str(ck_warmup_steps)))
+        self.ck_t_lo_frac = float(os.getenv("SELFRDB_CK_T_LO_FRAC", str(ck_t_lo_frac)))
+        self.ck_t_hi_frac = float(os.getenv("SELFRDB_CK_T_HI_FRAC", str(ck_t_hi_frac)))
 
         # 无判别器分支：改为自动优化 + 增加无对抗损失权重
         if not self.use_discriminator:
@@ -137,10 +156,17 @@ class BridgeRunner(L.LightningModule):
 
             # 直接重建（小权重）
             rec_loss   = F.l1_loss(x0_pred, x0)
-            loss = self.lambda_noise*noise_loss + self.lambda_post*post_loss + self.lambda_rec_loss*rec_loss
+            # 可选：跨步一致性 CK（仅无判别器路径）
+            ck_loss = torch.tensor(0.0, device=x0.device)
+            if self.lambda_ck > 0.0 and (torch.rand(()) < self.ck_prob):
+                ck_loss = self._compute_ck_loss(x0, y)
+
+            loss = self.lambda_noise*noise_loss + self.lambda_post*post_loss + self.lambda_rec_loss*rec_loss \
+                   + self.lambda_ck * ck_loss
 
             self.log_dict(
-                {"loss/noise": noise_loss, "loss/post": post_loss, "loss/rec": rec_loss, "loss/total": loss},
+                {"loss/noise": noise_loss, "loss/post": post_loss, "loss/rec": rec_loss,
+                 "loss/ck": ck_loss, "loss/total": loss},
                 on_epoch=True, prog_bar=True, sync_dist=True
             )
             return loss
@@ -358,6 +384,82 @@ class BridgeRunner(L.LightningModule):
         optimizer_d = Adam(self.discriminator.parameters(), lr=self.lr_d, betas=self.optim_betas)
         scheduler_d = CosineAnnealingLR(optimizer_d, T_max=self.trainer.max_epochs, eta_min=1e-5)
         return [optimizer_g, optimizer_d], [scheduler_g, scheduler_d]
+
+    def _compute_ck_loss(self, x0, y):
+        """
+        CK-path mean consistency (k=2):
+          A: t->t-1(mean)->G at t-1->t-2(mean)
+          B: direct two-step mean using x0_t (no G at t-1)
+        Returns scalar L1 loss (optionally time-normalized).
+        """
+        B = x0.shape[0]
+        device = x0.device
+        # Warm-up: skip CK for first N steps
+        if self.ck_warmup_steps > 0 and self.global_step < self.ck_warmup_steps:
+            return torch.tensor(0.0, device=device)
+
+        # Sample t in a middle-noise window [lo, hi] to avoid extremes
+        lo_idx = max(2, int(round(self.ck_t_lo_frac * self.n_steps)))
+        hi_idx = int(round(self.ck_t_hi_frac * self.n_steps))
+        lo_idx = max(2, min(self.n_steps, lo_idx))
+        hi_idx = max(lo_idx, min(self.n_steps, hi_idx))
+        t = torch.randint(lo_idx, hi_idx + 1, (B,), device=device)
+        # sample x_t from forward bridge (no need to return eps here)
+        x_t = self.diffusion.q_sample(t, x0, y)
+
+        # One generator forward at t (target branch, stop-grad to stabilize CK)
+        with torch.no_grad():
+            if self.use_standard_sc:
+                x0_hat1_t = self.generator(torch.cat((x_t, y), dim=1), t, x_r=None)
+                sc_in_t = x0_hat1_t.detach() if self.sc_stop_grad else x0_hat1_t
+                mask_shape = (B, 1) + (1,) * (x_t.ndim - 2)
+                m = (torch.rand(mask_shape, device=device) < self.sc_prob).float()
+                sc_in_t = sc_in_t * m
+                x0_t = self.generator(torch.cat((x_t, y), dim=1), t, x_r=sc_in_t)
+            else:
+                x0_t = self.generator(torch.cat((x_t, y), dim=1), t, x_r=None)
+
+        if self.ck_shared_noise:
+            # Shared-noise CK: sample x_{t-1} once, reuse as input for both paths,
+            # and share noise at the second step so noise cancels in the diff.
+            xi1 = torch.randn_like(x0)
+            x_tm1_samp = self.diffusion.q_posterior_sample_shared(t, x_t, x0_t, y, xi1)
+
+            if self.use_standard_sc:
+                x0_hat1_tm1 = self.generator(torch.cat((x_tm1_samp.detach(), y), dim=1), t-1, x_r=None)
+                sc_in_tm1 = x0_hat1_tm1.detach() if self.sc_stop_grad else x0_hat1_tm1
+                mask_shape = (B, 1) + (1,) * (x_t.ndim - 2)
+                m = (torch.rand(mask_shape, device=device) < self.sc_prob).float()
+                sc_in_tm1 = sc_in_tm1 * m
+                x0_tm1 = self.generator(torch.cat((x_tm1_samp.detach(), y), dim=1), t-1, x_r=sc_in_tm1)
+            else:
+                x0_tm1_in = x_tm1_samp.detach() if self.ck_detach_tm1 else x_tm1_samp
+                x0_tm1 = self.generator(torch.cat((x0_tm1_in, y), dim=1), t-1, x_r=None)
+
+            xi2 = torch.randn_like(x0)
+            x_tm2_A = self.diffusion.q_posterior_sample_shared(t-1, x_tm1_samp, x0_tm1, y, xi2)
+            x_tm2_B = self.diffusion.q_posterior_sample_shared(t-1, x_tm1_samp, x0_t,   y, xi2)
+        else:
+            # Mean-CK: use deterministic means (may introduce slight input shift at t-1)
+            x_tm1_mean = self.diffusion.q_posterior_mean(t, x_t, x0_t, y)
+            x0_tm1_in = x_tm1_mean.detach() if self.ck_detach_tm1 else x_tm1_mean
+            x0_tm1 = self.generator(torch.cat((x0_tm1_in, y), dim=1), t-1, x_r=None)
+            x_tm2_A = self.diffusion.q_posterior_mean(t-1, x_tm1_mean, x0_tm1, y)
+            x_tm2_B = self.diffusion.q_posterior2_mean(t, x_t, x0_t, y)
+
+        diff = x_tm2_A - x_tm2_B
+        if self.ck_time_norm:
+            # weight by 1/|a_{t-1}| where a_t is coeff on x0 in q_posterior_mean
+            a_t_minus_1, _, _ = self.diffusion.posterior_coeffs(t-1)
+            # per-sample scalar -> broadcast to diff's shape
+            w_scalar = (a_t_minus_1.abs() + 1e-8).reciprocal()
+            # clamp for numerical stability
+            w_scalar = w_scalar.clamp(max=1e3)
+            view_shape = (-1,) + (1,) * (diff.ndim - 1)
+            w = w_scalar.view(*view_shape)
+            diff = diff * w
+
+        return F.l1_loss(diff, torch.zeros_like(diff))
 
 
 class _LightningCLI(LightningCLI):
