@@ -112,4 +112,4 @@ data:
   norm: true
   num_workers: 8
 
-ckpt_path:
+ckpt_path: /home/xiaobin/Projects/SelfRDB/logs/experiment_ck/version_8/checkpoints/epoch=14-step=12675.ckpt
