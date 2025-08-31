@@ -53,7 +53,9 @@ class BridgeRunner(L.LightningModule):
 
         # Networks
         self.generator = NCSNpp(**generator_params)
-        self.discriminator = Discriminator_large(**discriminator_params)
+        # 判别器可选
+        self.use_discriminator = (discriminator_params is not None)
+        self.discriminator = Discriminator_large(**discriminator_params) if self.use_discriminator else None
 
         # Configure diffusion
         self.diffusion = DiffusionBridge(**diffusion_params)
@@ -74,12 +76,76 @@ class BridgeRunner(L.LightningModule):
         self.sc_stop_grad = (os.getenv("SELFRDB_SC_STOP_GRAD", "1" if sc_stop_grad else "0") == "1")
         self.drop_r_prob = float(os.getenv("SELFRDB_DROP_R_PROB", str(drop_r_prob)))
 
+        # 无判别器分支：改为自动优化 + 增加无对抗损失权重
+        if not self.use_discriminator:
+            self.automatic_optimization = True
+        # 无判别器权重（噪声监督 + 共享噪声后验）
+        self.lambda_noise = float(os.getenv("LAMBDA_NOISE", "1.0"))
+        self.lambda_post  = float(os.getenv("LAMBDA_POST",  "0.25"))
+
     # --------------------
     # Training
     # --------------------
     def training_step(self, batch):
         x0, y, _ = batch
-        
+
+        # ===== 无判别器路径：噪声监督 + 共享噪声后验（自动优化） =====
+        if not self.use_discriminator:
+            # 采样一个时间步并生成 x_t（前向桥）
+            t = torch.randint(1, self.n_steps+1, (x0.shape[0],), device=x0.device)
+            x_t, eps = self.diffusion.q_sample(t, x0, y, return_eps=True)
+
+            # 标准 SC：同一 t 两次前向 + stop-grad + 逐样本掩码
+            if self.use_standard_sc:
+                x0_hat1 = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=None)
+                sc_in = x0_hat1.detach() if self.sc_stop_grad else x0_hat1
+                m = (torch.rand(x0.shape[0], 1, 1, 1, device=x0.device) < self.sc_prob).float()
+                sc_in = sc_in * m
+                x0_pred = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=sc_in)
+            else:
+                # 非 SC：可按需要走 Drop-R/AA（一般建议关闭以保持一致）
+                local_r = self.n_recursions
+                if local_r > 1 and self.drop_r_prob > 0.0 and torch.rand(()) < self.drop_r_prob:
+                    local_r = max(1, local_r - 1)
+                if self.use_aa_train:
+                    def F_step(x_r):
+                        return self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x_r)
+                    x0_pred = anderson_accel(
+                        F_step, torch.zeros_like(x_t),
+                        m=self.aa_m, lam=self.aa_lam, damping=self.aa_damp,
+                        K=local_r, tol=None
+                    )
+                else:
+                    x0_r = torch.zeros_like(x_t)
+                    for _ in range(local_r):
+                        x0_r = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x0_r)
+                    x0_pred = x0_r
+
+            # 噪声监督（DDPM）：epsilon 预测 vs 真实 eps
+            shape = [-1] + [1] * (x0.ndim - 1)
+            mu_x0 = self.diffusion.mu_x0[t].view(shape)
+            mu_y  = self.diffusion.mu_y[t].view(shape)
+            std   = self.diffusion.std[t].view(shape)
+            eps_hat = (x_t - mu_x0 * x0_pred - mu_y * y) / (std + 1e-8)
+            noise_loss = F.mse_loss(eps_hat, eps)
+
+            # 共享噪声的后验对齐（同一 xi）
+            xi = torch.randn_like(x0)
+            x_tm1_pred = self.diffusion.q_posterior_sample_shared(t, x_t, x0_pred, y, xi)
+            x_tm1_gt   = self.diffusion.q_posterior_sample_shared(t, x_t, x0,      y, xi)
+            post_loss  = F.l1_loss(x_tm1_pred, x_tm1_gt)
+
+            # 直接重建（小权重）
+            rec_loss   = F.l1_loss(x0_pred, x0)
+            loss = self.lambda_noise*noise_loss + self.lambda_post*post_loss + self.lambda_rec_loss*rec_loss
+
+            self.log_dict(
+                {"loss/noise": noise_loss, "loss/post": post_loss, "loss/rec": rec_loss, "loss/total": loss},
+                on_epoch=True, prog_bar=True, sync_dist=True
+            )
+            return loss
+
+        # ===== 有判别器路径：手动优化（原始 SelfRDB 逻辑） =====
         optimizer_g, optimizer_d = self.optimizers()
         scheduler_g, scheduler_d = self.lr_schedulers()
 
@@ -104,11 +170,11 @@ class BridgeRunner(L.LightningModule):
 
         # 1.b Fake
         if self.use_standard_sc:
-            # 标准SC：同一 t 两次前向；第二次以 stop-grad 的第一次输出为 SC 通道，按概率置零
+            # 标准SC：同一 t 两次前向；第二次以 stop-grad 的第一次输出为 SC 通道（逐样本掩码）
             x0_hat1 = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=None)
             sc_in = x0_hat1.detach() if self.sc_stop_grad else x0_hat1
-            if random() > self.sc_prob:
-                sc_in = None
+            m = (torch.rand(x0.shape[0], 1, 1, 1, device=x0.device) < self.sc_prob).float()
+            sc_in = sc_in * m
             x0_pred = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=sc_in)
         else:
             # Drop-R：以概率将步内递归从 n_recursions 减 1（至少为 1）
@@ -151,8 +217,8 @@ class BridgeRunner(L.LightningModule):
         if self.use_standard_sc:
             x0_hat1 = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=None)
             sc_in = x0_hat1.detach() if self.sc_stop_grad else x0_hat1
-            if random() > self.sc_prob:
-                sc_in = None
+            m = (torch.rand(x0.shape[0], 1, 1, 1, device=x0.device) < self.sc_prob).float()
+            sc_in = sc_in * m
             x0_pred = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=sc_in)
         else:
             local_r = self.n_recursions
@@ -285,8 +351,11 @@ class BridgeRunner(L.LightningModule):
     
     def configure_optimizers(self):
         optimizer_g = Adam(self.generator.parameters(), lr=self.lr_g, betas=self.optim_betas)
-        optimizer_d = Adam(self.discriminator.parameters(), lr=self.lr_d, betas=self.optim_betas)
         scheduler_g = CosineAnnealingLR(optimizer_g, T_max=self.trainer.max_epochs, eta_min=1e-5)
+        if not self.use_discriminator:
+            return [optimizer_g], [scheduler_g]
+
+        optimizer_d = Adam(self.discriminator.parameters(), lr=self.lr_d, betas=self.optim_betas)
         scheduler_d = CosineAnnealingLR(optimizer_d, T_max=self.trainer.max_epochs, eta_min=1e-5)
         return [optimizer_g, optimizer_d], [scheduler_g, scheduler_d]
 

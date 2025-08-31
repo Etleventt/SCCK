@@ -45,15 +45,17 @@ class DiffusionBridge(L.LightningModule):
         self.register_buffer("mu_y", torch.tensor(mu_y))
         self.register_buffer("std", torch.tensor(std))
 
-    def q_sample(self, t, x0, y):
-        """ Sample q(x_t | x_0, y) """
+    def q_sample(self, t, x0, y, return_eps: bool = False):
+        """ Sample q(x_t | x_0, y). If return_eps=True, also return the used noise. """
         shape = [-1] + [1] * (x0.ndim - 1)
 
         mu_x0 = self.mu_x0[t].view(shape)
         mu_y = self.mu_y[t].view(shape)
         std = self.std[t].view(shape)
-
-        x_t = mu_x0*x0 + mu_y*y + std*torch.randn_like(x0)
+        eps = torch.randn_like(x0)
+        x_t = mu_x0*x0 + mu_y*y + std*eps
+        if return_eps:
+            return x_t.detach(), eps.detach()
         return x_t.detach()
 
     def q_posterior(self, t, x_t, x0, y):
@@ -77,6 +79,57 @@ class DiffusionBridge(L.LightningModule):
 
         x_tm1 = x_tm1_mean + v.sqrt() * torch.randn_like(x_t)
         return x_tm1
+
+    def q_posterior_sample_shared(self, t, x_t, x0, y, xi):
+        """Sample x_{t-1} using provided standard normal xi (shared noise for GT/pred)."""
+        shape = [-1] + [1] * (x0.ndim - 1)
+
+        std_t = self.s[t].view(shape)
+        std_tm1 = self.s[t-1].view(shape)
+        mu_x0_t = self.mu_x0[t].view(shape)
+        mu_x0_tm1 = self.mu_x0[t-1].view(shape)
+        mu_y_t = self.mu_y[t].view(shape)
+        mu_y_tm1 = self.mu_y[t-1].view(shape)
+
+        var_t = std_t**2
+        var_tm1 = std_tm1**2
+        var_t_tm1 = var_t - var_tm1 * (mu_x0_t / mu_x0_tm1)**2
+        v = var_t_tm1 * (var_tm1 / var_t)
+
+        x_tm1_mean = mu_x0_tm1 * x0 + mu_y_tm1 * y + \
+            ((var_tm1 - v) / var_t).sqrt() * (x_t - mu_x0_t * x0 - mu_y_t * y)
+        return x_tm1_mean + v.sqrt() * xi
+
+    def q_posterior_mean(self, t, x_t, x0, y):
+        """Return E[x_{t-1} | x_t, x0, y] (no sampling)."""
+        shape = [-1] + [1] * (x0.ndim - 1)
+
+        std_t = self.s[t].view(shape)
+        std_tm1 = self.s[t-1].view(shape)
+        mu_x0_t = self.mu_x0[t].view(shape)
+        mu_x0_tm1 = self.mu_x0[t-1].view(shape)
+        mu_y_t = self.mu_y[t].view(shape)
+        mu_y_tm1 = self.mu_y[t-1].view(shape)
+
+        var_t = std_t**2
+        var_tm1 = std_tm1**2
+        var_t_tm1 = var_t - var_tm1 * (mu_x0_t / mu_x0_tm1)**2
+        v = var_t_tm1 * (var_tm1 / var_t)
+
+        x_tm1_mean = mu_x0_tm1 * x0 + mu_y_tm1 * y + \
+            ((var_tm1 - v) / var_t).sqrt() * (x_t - mu_x0_t * x0 - mu_y_t * y)
+        return x_tm1_mean
+
+    def forward_residual_normed(self, t, x_t, x0_hat, y):
+        """
+        Normalized forward residual for NLL/MSE:
+        z_t = (x_t - mu_x0[t]*x0_hat - mu_y[t]*y) / std[t]
+        """
+        shape = [-1] + [1] * (x_t.ndim - 1)
+        mu_x0 = self.mu_x0[t].view(shape)
+        mu_y = self.mu_y[t].view(shape)
+        std = self.std[t].view(shape)
+        return (x_t - mu_x0 * x0_hat - mu_y * y) / (std + 1e-8)
 
     @torch.inference_mode()
     def sample_x0(self, y, generator, anderson=None):
