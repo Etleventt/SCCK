@@ -6,23 +6,27 @@ from skimage.metrics import structural_similarity as ssim
 import torch
 import matplotlib.pyplot as plt
 
+def _to01_t(x):
+    # x: torch.Tensor [B, C, H, W]
+    if torch.nan_to_num(x).min() < -0.1:   # 判定为 [-1,1]
+        x = (x + 1.0) / 2.0
+    return x.clamp(0, 1)
 
-# -----------------------------
-# Basic image pair saver (unchanged)
-# -----------------------------
 def save_image_pair(x0, x0_pred, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    x0 = _to01_t(x0)
+    x0_pred = _to01_t(x0_pred)
 
     n_image = min(4, x0.shape[0])
     fig, axes = plt.subplots(nrows=2, ncols=n_image, figsize=(n_image*2, 4))
-
     if n_image == 1:
         axes = axes[..., None]
 
     for i in range(n_image):
-        axes[0, i].imshow(x0[i].permute(1, 2, 0).cpu().numpy(), cmap='gray')
+        # 单通道更稳：imshow(H,W)
+        axes[0, i].imshow(x0[i, 0].detach().cpu().numpy(), cmap='gray')
         axes[0, i].axis('off')
-        axes[1, i].imshow(x0_pred[i].permute(1, 2, 0).cpu().numpy(), cmap='gray')
+        axes[1, i].imshow(x0_pred[i, 0].detach().cpu().numpy(), cmap='gray')
         axes[1, i].axis('off')
 
     plt.tight_layout(pad=0.1)
