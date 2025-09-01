@@ -1,31 +1,46 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-BraTS -> SelfRDB, **official-aligned** preprocessing (speed-optimized).
+BraTS -> SelfRDB, **official-aligned** preprocessing (speed-optimized, bug-fixed, mask export).
 
 Key alignment to the paper/repo:
-- RAS+ axial, 2D slices; **no resize**; **zero-pad/crop to 256×256**.
-- Per-volume brain-ROI mean normalization to **1.0**.
+- RAS+ axial, 2D slices; **no resize**; **zero-pad / center-crop to 256×256** (no interpolation).
+- Per-volume brain-ROI mean normalization to **1.0** (within multi-modal union mask).
 - Train-split, per-modality **global robust percentiles** -> map to **[-1,1]**, then save **[0,1]**.
-- Subject-level splits; full-slice outputs in SelfRDB NumpyDataset layout (no masks).
+- Subject-level splits; full-slice outputs in SelfRDB NumpyDataset layout; **optional mask export**.
 
-Speed features:
-- Pass1 now loads each subject **once** (all modalities together), computes union mask once,
-  samples up to `--samples_per_subject` voxels/subject for each modality.
-- Percentiles are **cached** to `<out_root>/global_stats.json` and reused (unless `--force_recompute_stats 1`).
-- Optional `--fast 1` to compute percentiles from first `--fast_subjects` training subjects.
+Quality & speed features:
+- Pass1 loads each subject **once** (all modalities together), computes **union mask** once,
+  samples up to `--samples_per_subject` voxels/subject per modality.
+- Percentiles are **cached** to `<out_root>/global_stats.json` and reused unless `--force_recompute_stats 1`。
+- Optional `--fast 1` to compute percentiles from first `--fast_subjects` training subjects。
+- **Case-insensitive** modality filename matching (e.g., `T1` vs `t1`).
+- **Deterministic** RNG for Pass1 sampling (stable per subject).
+- **Resume** export works as expected (no accidental re-zeroing).
+- **Safe save** in both CPU & CUDA branches to avoid partial writes.
+- **Mask export**: `--export_mask 1` writes `mask/<split>/slice_*.npy` (uint8, 0/1)。
 
-Usage:
-python prepare_brats_for_selfrdb_official.py \
+Usage
+-----
+python prepare_brats_official_aligned_256.py \
   --root /path/to/BraTS2021_root \
   --out_root /path/to/OUT/brats256_selfrdb \
   --modalities T1,T2,FLAIR,T1CE \
-  --split 0.8 0.1 0.1 --seed 42
+  --split 0.8 0.1 0.1 --seed 42 \
+  --export_mask 1 --mask_kind union
+
+Notes on masks
+--------------
+- `mask_kind=union`: 每个切片的掩膜取 **所有模态** 的非零并集（推荐）。
+- `mask_kind=ref`:    掩膜取指定模态（`--ref_for_mask t1`）的非零区域。
+- 掩膜与图像一样进行**中心裁切/零填充到 256**，保存为 **uint8 0/1**。
+- 若你在评测时想按脑区计算 PSNR/SSIM，确保你的评测脚本读取 `mask/` 并传给 `compute_metrics(mask=...)`。
 """
 
-import argparse, os, json, random, re, errno, time, glob
+from __future__ import annotations
+import argparse, os, json, random, re, time, hashlib
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
 import nibabel as nib
@@ -55,21 +70,40 @@ def find_subjects(root: Path) -> List[Path]:
             pats += [p for p in d.glob("BraTS2021_*") if p.is_dir()]
     if not pats:
         pats = [p for p in root.glob("TCGA-*/BraTS2021_*") if p.is_dir()]
+    if not pats:
+        pats = [p for p in root.glob("BraTS2021_*") if p.is_dir()]  # fallback: subjects directly under root
     return sorted(pats)
 
+
 def mod_file(sub: Path, m: str) -> Path | None:
-    ls = list(sub.glob(f"*_{m}.nii*"))
-    return ls[0] if ls else None
+    """Case-insensitive modality file matcher like *_t1.nii.gz, *_T1.nii, etc."""
+    # try exact pattern first
+    hits = list(sub.glob(f"*_{m}.nii*"))
+    if hits:
+        return hits[0]
+    # then try lower/upper
+    ml, mu = m.lower(), m.upper()
+    hits = list(sub.glob(f"*_{ml}.nii*")) or list(sub.glob(f"*_{mu}.nii*"))
+    if hits:
+        return hits[0]
+    # final: regex case-insensitive over all nii files
+    for p in sub.glob("*.nii*"):
+        if re.search(rf"_{re.escape(m)}(\.nii(\.gz)?)$", p.name, flags=re.IGNORECASE):
+            return p
+    return None
+
 
 def as_ras_axial(nii: nib.Nifti1Image) -> np.ndarray:
     ras = nib.as_closest_canonical(nii)
     arr = ras.get_fdata(dtype=np.float32)
     return np.transpose(arr, (2, 1, 0))  # (Z,H,W)
 
+
 def pad_to_center(arr2d: np.ndarray, size: int = 256) -> np.ndarray:
     H, W = arr2d.shape
     if H == size and W == size:
         return arr2d.astype(np.float32, copy=False)
+    # center-crop if larger
     if H > size:
         y0 = (H - size) // 2
         arr2d = arr2d[y0:y0 + size, :]
@@ -78,14 +112,15 @@ def pad_to_center(arr2d: np.ndarray, size: int = 256) -> np.ndarray:
         x0 = (W - size) // 2
         arr2d = arr2d[:, x0:x0 + size]
         W = size
+    # pad if smaller
     py0 = (size - H) // 2
     px0 = (size - W) // 2
     out = np.zeros((size, size), dtype=np.float32)
     out[py0:py0 + H, px0:px0 + W] = arr2d.astype(np.float32)
     return out
 
+
 def pad_to_center_torch(arr2d: 'torch.Tensor', size: int = 256) -> 'torch.Tensor':
-    """arr2d: (H,W) on any device, float32. Center-crop/pad to size using torch ops."""
     H, W = int(arr2d.shape[0]), int(arr2d.shape[1])
     if H > size:
         y0 = (H - size) // 2
@@ -100,12 +135,14 @@ def pad_to_center_torch(arr2d: 'torch.Tensor', size: int = 256) -> 'torch.Tensor
     pad = (px0, size - W - px0, py0, size - H - py0)  # (left,right,top,bottom)
     return torch.nn.functional.pad(arr2d, pad, mode='constant', value=0.0)
 
+
 def brain_mask_union(vols: Dict[str, np.ndarray]) -> np.ndarray:
     mask = None
     for v in vols.values():
         m = (v > 0).astype(np.uint8)
         mask = m if mask is None else (mask | m)
     return mask.astype(np.uint8)
+
 
 def per_volume_mean_normalize(vol: np.ndarray, mask3d: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     inside = vol[mask3d > 0]
@@ -115,9 +152,14 @@ def per_volume_mean_normalize(vol: np.ndarray, mask3d: np.ndarray, eps: float = 
 
 # ----------------------- percentiles (Pass1) -----------------------
 
+def _sid_seed(seed: int, sid: str) -> int:
+    h = hashlib.md5(sid.encode("utf-8")).hexdigest()[:8]
+    return seed + int(h, 16)
+
+
 def _pass1_worker(args_tuple):
     sid, mods, sid2files, samples_per_subject, seed = args_tuple
-    rng = np.random.default_rng(seed + hash(sid) % (2**16))
+    rng = np.random.default_rng(_sid_seed(seed, sid))
     # load all requested modalities once
     vols = {}
     for m in mods:
@@ -138,10 +180,11 @@ def _pass1_worker(args_tuple):
         out[m] = inside[idx].astype(np.float32, copy=False)
     return out
 
+
 def compute_or_load_global_stats(out_root: Path, mods: List[str], splits: Dict[str, List[str]], sid2files: Dict[str, Dict[str, Path]],
                                  q_lo: float, q_hi: float, seed: int, fast: int, fast_subjects: int,
                                  samples_per_subject: int, max_samples_per_mod: int,
-                                 force_recompute: int, p1_workers: int) -> tuple[Dict[str, float], Dict[str, float]]:
+                                 force_recompute: int, p1_workers: int):
     stats_file = out_root / "global_stats.json"
     if stats_file.exists() and not force_recompute:
         data = json.loads(stats_file.read_text())
@@ -221,7 +264,6 @@ def _preprocess_slice_cuda(x: 'torch.Tensor', lo: float, hi: float, size: int) -
 
 
 def _auto_probe_device(example_np: np.ndarray, lo: float, hi: float, size: int, repeat: int = 64) -> str:
-    import time
     # CPU timing
     t0 = time.time()
     for _ in range(repeat):
@@ -266,7 +308,6 @@ def _safe_np_save(path: Path, arr: np.ndarray, retries: int = 3, sleep: float = 
                 try: os.unlink(tmp)
                 except: pass
             time.sleep(sleep * (k+1))
-    # re-raise with context
     raise OSError(f"safe_np_save failed for {path} after {retries} retries: {last_err}")
 
 
@@ -286,7 +327,7 @@ def _next_start_index(out_root: Path, mods: List[str], split: str) -> int:
 # ----------------------- main -----------------------
 
 def main():
-    ap = argparse.ArgumentParser("BraTS -> SelfRDB (official-aligned, 256 pad, cached percentiles)")
+    ap = argparse.ArgumentParser("BraTS -> SelfRDB (official-aligned, 256 pad, cached percentiles + mask)")
     ap.add_argument("--root", required=True, type=Path)
     ap.add_argument("--out_root", required=True, type=Path)
     ap.add_argument("--modalities", default="T1,T2,FLAIR,T1CE")
@@ -297,6 +338,10 @@ def main():
     ap.add_argument("--q_lo", type=float, default=0.1)
     ap.add_argument("--q_hi", type=float, default=99.9)
     ap.add_argument("--per_volume", type=int, default=0)
+    # mask export options
+    ap.add_argument("--export_mask", type=int, default=0, help="1 to export mask/<split>/slice_*.npy (uint8)")
+    ap.add_argument("--mask_kind", type=str, default='union', choices=['union','ref'], help="mask=union of all modalities >0, or ref modality >0")
+    ap.add_argument("--ref_for_mask", type=str, default='t1', help="used when --mask_kind=ref; case-insensitive")
     # speed toggles
     ap.add_argument("--fast", type=int, default=0, help="1=estimate percentiles on a subset of train subjects")
     ap.add_argument("--fast_subjects", type=int, default=12)
@@ -304,7 +349,6 @@ def main():
     ap.add_argument("--max_samples_per_mod", type=int, default=2_000_000)
     ap.add_argument("--force_recompute_stats", type=int, default=0)
     ap.add_argument("--resume", type=int, default=0, help="resume Pass2 by appending after existing contiguous slices")
-    # parallel/GPU toggles
     # parallel/GPU toggles
     ap.add_argument("--p1_workers", type=int, default=max(os.cpu_count() // 2, 1), help="workers for Pass1 percentile scan")
     ap.add_argument("--device", type=str, default="auto", choices=["auto","cpu","cuda"], help="compute device for Pass2 ops")
@@ -346,6 +390,9 @@ def main():
     for m in mods:
         for sp in ["train", "val", "test"]:
             (args.out_root / m / sp).mkdir(parents=True, exist_ok=True)
+    if args.export_mask:
+        for sp in ["train", "val", "test"]:
+            (args.out_root / 'mask' / sp).mkdir(parents=True, exist_ok=True)
 
     # Pass1: global percentiles with caching / fast mode
     global_lo, global_hi = compute_or_load_global_stats(
@@ -363,12 +410,11 @@ def main():
     subj_ids = {"train": [], "val": [], "test": []}
     if args.resume:
         for sp in ["train","val","test"]:
-            start = _next_start_index(args.out_root, mods, sp)
+            mods_for_resume = mods + (['mask'] if args.export_mask else [])
+            start = _next_start_index(args.out_root, mods_for_resume, sp)
             if start > 0:
                 print(f"[resume] {sp}: starting from slice_{start}")
             counters[sp] = start
-    counters = {"train": 0, "val": 0, "test": 0}
-    subj_ids = {"train": [], "val": [], "test": []}
 
     # device resolution
     if args.device == 'auto':
@@ -386,8 +432,9 @@ def main():
 
     probed = False
 
+    ref_mask_key = args.ref_for_mask.lower()
+
     for sp, sid_list in splits.items():
-        # respect cap when resuming
         if args.max_slices_per_split and counters[sp] >= args.max_slices_per_split:
             print(f"[limit] {sp}: already has {counters[sp]} >= cap {args.max_slices_per_split}; skipping split")
             continue
@@ -423,6 +470,15 @@ def main():
                 for z in z_indices:
                     if args.max_slices_per_split and counters[sp] >= args.max_slices_per_split:
                         break
+                    # ---- build mask 2D before writing (on CPU) ----
+                    if args.export_mask:
+                        if args.mask_kind == 'union':
+                            m2d = (mask3d_np[z] > 0).astype(np.uint8)
+                        else:  # ref
+                            k = ref_mask_key if ref_mask_key in vols_np else list(vols_np.keys())[0]
+                            m2d = (vols_np[k][z] > 0).astype(np.uint8)
+                        m2d = pad_to_center(m2d, size=args.size).astype(np.uint8)
+                    # ---- modalities ----
                     for m in mods:
                         x = vols_np[m][z]
                         lo = global_lo[m]; hi = global_hi[m]
@@ -432,13 +488,25 @@ def main():
                         xt = 0.5 * (xt + 1.0)
                         xt = torch.clamp(xt, 0.0, 1.0)
                         xt = pad_to_center_torch(xt, size=args.size)
-                        np.save(args.out_root / m / sp / f"slice_{counters[sp]}.npy", xt.cpu().numpy().astype(np.float32))
+                        _safe_np_save(args.out_root / m / sp / f"slice_{counters[sp]}.npy",
+                                      xt.cpu().numpy().astype(np.float32))
+                    if args.export_mask:
+                        _safe_np_save(args.out_root / 'mask' / sp / f"slice_{counters[sp]}.npy", m2d)
                     subj_ids[sp].append(f"{sid}|z={int(z)}")
                     counters[sp] += 1
             else:
                 for z in z_indices:
                     if args.max_slices_per_split and counters[sp] >= args.max_slices_per_split:
                         break
+                    # ---- build mask 2D ----
+                    if args.export_mask:
+                        if args.mask_kind == 'union':
+                            m2d = (mask3d_np[z] > 0).astype(np.uint8)
+                        else:
+                            k = ref_mask_key if ref_mask_key in vols_np else list(vols_np.keys())[0]
+                            m2d = (vols_np[k][z] > 0).astype(np.uint8)
+                        m2d = pad_to_center(m2d, size=args.size).astype(np.uint8)
+                    # ---- modalities ----
                     for m in mods:
                         x = vols_np[m][z]
                         lo = global_lo[m]; hi = global_hi[m]
@@ -448,6 +516,8 @@ def main():
                         x = np.clip(x, 0.0, 1.0).astype(np.float32)
                         x = pad_to_center(x, size=args.size)
                         _safe_np_save(args.out_root / m / sp / f"slice_{counters[sp]}.npy", x)
+                    if args.export_mask:
+                        _safe_np_save(args.out_root / 'mask' / sp / f"slice_{counters[sp]}.npy", m2d)
                     subj_ids[sp].append(f"{sid}|z={int(z)}")
                     counters[sp] += 1
 
@@ -462,18 +532,30 @@ def main():
         "global_hi": global_hi,
         "seed": args.seed,
         "max_slices_per_split": args.max_slices_per_split,
+        "resume": bool(args.resume),
+        "device_final": device,
+        "pass1": {
+            "fast": bool(args.fast),
+            "fast_subjects": args.fast_subjects,
+            "samples_per_subject": args.samples_per_subject,
+            "max_samples_per_mod": args.max_samples_per_mod,
+            "workers": args.p1_workers
+        },
+        "mask": {
+            "export": bool(args.export_mask),
+            "kind": args.mask_kind,
+            "ref_for_mask": args.ref_for_mask
+        },
         "notes": {
             "mean_norm": "per-volume mean within union brain mask set to 1",
             "global_scale": "train-set robust percentiles per modality mapped to [-1,1], saved to [0,1]",
-            "pad": "zero-pad/crop to 256",
-            "device": device,
-            "p1_workers": args.p1_workers
+            "pad": "zero-pad/center-crop to square size"
         }
     }
 
     (args.out_root / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     for sp in ["train", "val", "test"]:
-        (args.out_root / f"subject_ids_{sp}.txt").write_text("".join(subj_ids[sp]), encoding="utf-8")
+        (args.out_root / f"subject_ids_{sp}.txt").write_text("\n".join(subj_ids[sp]) + "\n", encoding="utf-8")
     print("[done]", args.out_root)
 
 if __name__ == "__main__":

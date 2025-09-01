@@ -53,7 +53,13 @@ class NumpyDataset(BaseDataset):
         stage,
         image_size,
         norm=True,
-        padding=True
+        padding=True,
+        # --- Subset control (test-time sampling) ---
+        max_items: int = 0,          # 0 = no limit; >0 keep only N items
+        subset_mode: str = "first",  # "first" | "random"
+        subset_seed: int = 42,
+        # --- Memory/IO control ---
+        lazy: bool = False,          # If True, defer loading files to __getitem__ (per-sample load)
     ):
         super().__init__(
             data_dir,
@@ -64,30 +70,75 @@ class NumpyDataset(BaseDataset):
             norm,
             padding
         )
+        # record chosen indices if subsetting is applied
+        self.indices = None
+        self._lazy = bool(lazy) and (stage in ("train",))
 
-        # Load target images
-        self.target = self._load_data(self.target_modality)
-        self.source = self._load_data(self.source_modality)
+        if self._lazy:
+            # Build file lists only; load per-sample in __getitem__
+            self.target_files = self._list_files(self.target_modality)
+            self.source_files = self._list_files(self.source_modality)
+            N = len(self.target_files)
+            if max_items and max_items > 0 and N > max_items:
+                if subset_mode == "random":
+                    rng = np.random.default_rng(subset_seed)
+                    idx = np.sort(rng.choice(N, size=max_items, replace=False))
+                else:
+                    idx = np.arange(max_items)
+                self.indices = idx.astype(int)
+                self.target_files = [self.target_files[i] for i in self.indices]
+                self.source_files = [self.source_files[i] for i in self.indices]
 
-        # Get original shape
-        self.original_shape = self.target.shape[-2:]
+            # Determine original shape from the first file
+            if len(self.target_files) == 0:
+                raise RuntimeError(f"No files found for {self.target_modality}/{self.stage} in {self.data_dir}")
+            sample = np.load(self.target_files[0])
+            self.original_shape = sample.shape[-2:]
+            # subject_ids are not used in training; skip loading to save RAM
+            self.subject_ids = None
+            # Do not pre-pad/normalize here; done in __getitem__
+        else:
+            # Eager load arrays (val/test)
+            self.target = self._load_data(self.target_modality)
+            self.source = self._load_data(self.source_modality)
 
-        # Load subject ids
-        self.subject_ids = self._load_subject_ids('subject_ids.yaml')
+            # Optional: apply subset on loaded arrays before padding/normalize
+            N = self.target.shape[0]
+            if max_items and max_items > 0 and N > max_items:
+                if subset_mode == "random":
+                    rng = np.random.default_rng(subset_seed)
+                    idx = np.sort(rng.choice(N, size=max_items, replace=False))
+                else:
+                    idx = np.arange(max_items)
+                self.indices = idx.astype(int)
+                self.target = self.target[self.indices]
+                self.source = self.source[self.indices]
 
-        # Padding
-        if self.padding:
-            self.target = self._pad_data(self.target)
-            self.source = self._pad_data(self.source)
+            # Get original shape
+            self.original_shape = self.target.shape[-2:]
 
-        # Normalize
-        if self.norm:
-            self.target = self._normalize(self.target)
-            self.source = self._normalize(self.source)
+            # Load subject ids
+            self.subject_ids = self._load_subject_ids('subject_ids.yaml')
+            # If subset applied and subject_ids is aligned per-slice, subset it as well
+            if self.subject_ids is not None and self.indices is not None and len(self.subject_ids) >= len(self.target):
+                try:
+                    self.subject_ids = self.subject_ids[self.indices]
+                except Exception:
+                    pass
 
-        # Expand channel dim
-        self.target = np.expand_dims(self.target, axis=1)
-        self.source = np.expand_dims(self.source, axis=1)
+            # Padding
+            if self.padding:
+                self.target = self._pad_data(self.target)
+                self.source = self._pad_data(self.source)
+
+            # Normalize
+            if self.norm:
+                self.target = self._normalize(self.target)
+                self.source = self._normalize(self.source)
+
+            # Expand channel dim
+            self.target = np.expand_dims(self.target, axis=1)
+            self.source = np.expand_dims(self.source, axis=1)
 
     def _load_data(self, contrast):
         data_dir = os.path.join(self.data_dir, contrast, self.stage)
@@ -99,8 +150,22 @@ class NumpyDataset(BaseDataset):
         data = []
         for file in files:
             data.append(np.load(os.path.join(data_dir, file)))
-        
-        return np.array(data).astype(np.float32)
+
+        arr = np.array(data)
+        if contrast.lower() == 'mask':
+            # keep uint8 for mask; and if subset applied, slice accordingly
+            arr = arr.astype(np.uint8)
+            if getattr(self, 'indices', None) is not None:
+                arr = arr[self.indices]
+        else:
+            arr = arr.astype(np.float32)
+        return arr
+
+    def _list_files(self, contrast):
+        data_dir = os.path.join(self.data_dir, contrast, self.stage)
+        files = [f for f in os.listdir(data_dir) if f.endswith('.npy')]
+        files.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
+        return [os.path.join(data_dir, f) for f in files]
 
     def _load_subject_ids(self, filename):
         subject_ids_path = os.path.join(self.data_dir, filename)
@@ -113,10 +178,27 @@ class NumpyDataset(BaseDataset):
         return subject_ids
 
     def __len__(self):
+        if getattr(self, "_lazy", False):
+            return len(self.source_files)
         return len(self.source)
 
     def __getitem__(self, i):
-        return self.target[i], self.source[i], i
+        if getattr(self, "_lazy", False):
+            # Per-sample load and transform
+            tgt = np.load(self.target_files[i]).astype(np.float32)
+            src = np.load(self.source_files[i]).astype(np.float32)
+            if self.padding:
+                tgt = self._pad_data(tgt[None, ...])[0]
+                src = self._pad_data(src[None, ...])[0]
+            if self.norm:
+                tgt = self._normalize(tgt)
+                src = self._normalize(src)
+            # Add channel dim
+            tgt = np.expand_dims(tgt, axis=0)
+            src = np.expand_dims(src, axis=0)
+            return tgt, src, i
+        else:
+            return self.target[i], self.source[i], i
 
 
 class DataModule(L.LightningDataModule):
@@ -133,6 +215,16 @@ class DataModule(L.LightningDataModule):
         val_batch_size=1,
         test_batch_size=1,
         num_workers=1,
+        # --- test subset controls ---
+        test_max_samples: int = 0,
+        test_subset_mode: str = "first",
+        test_subset_seed: int = 42,
+        # --- val subset controls ---
+        val_max_samples: int = 0,
+        val_subset_mode: str = "first",
+        val_subset_seed: int = 42,
+        # --- train memory control ---
+        train_lazy: bool = False,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -149,6 +241,16 @@ class DataModule(L.LightningDataModule):
         self.num_workers = num_workers
 
         self.dataset_class = globals()[dataset_class]
+        # store test subset params
+        self.test_max_samples = test_max_samples
+        self.test_subset_mode = test_subset_mode
+        self.test_subset_seed = test_subset_seed
+        # store val subset params
+        self.val_max_samples = val_max_samples
+        self.val_subset_mode = val_subset_mode
+        self.val_subset_seed = val_subset_seed
+        # train lazy
+        self.train_lazy = train_lazy
 
     def setup(self, stage: str) -> None:
         target_modality = self.target_modality
@@ -162,7 +264,8 @@ class DataModule(L.LightningDataModule):
                 stage='train',
                 image_size=self.image_size,
                 padding=self.padding,
-                norm=self.norm
+                norm=self.norm,
+                lazy=self.train_lazy,
             )
 
             self.val_dataset = self.dataset_class(
@@ -172,7 +275,26 @@ class DataModule(L.LightningDataModule):
                 stage='val',
                 image_size=self.image_size,
                 padding=self.padding,
-                norm=self.norm
+                norm=self.norm,
+                # val subset controls
+                max_items=self.val_max_samples,
+                subset_mode=self.val_subset_mode,
+                subset_seed=self.val_subset_seed,
+            )
+
+        if stage == "validate":
+            self.val_dataset = self.dataset_class(
+                target_modality=target_modality,
+                source_modality=source_modality,
+                data_dir=self.dataset_dir,
+                stage='val',
+                image_size=self.image_size,
+                padding=self.padding,
+                norm=self.norm,
+                # val subset controls
+                max_items=self.val_max_samples,
+                subset_mode=self.val_subset_mode,
+                subset_seed=self.val_subset_seed,
             )
 
         if stage == "test":
@@ -183,7 +305,11 @@ class DataModule(L.LightningDataModule):
                 stage='test',
                 image_size=self.image_size,
                 padding=self.padding,
-                norm=self.norm
+                norm=self.norm,
+                # subset only for test
+                max_items=self.test_max_samples,
+                subset_mode=self.test_subset_mode,
+                subset_seed=self.test_subset_seed,
             )
 
     def train_dataloader(self):
