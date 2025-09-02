@@ -305,7 +305,7 @@ class BridgeRunner(L.LightningModule):
     # Validation
     # --------------------
     def validation_step(self, batch, batch_idx):
-        x0, y, _ = batch
+        x0, y, idx = batch
         # 推理：把 YAML 的 anderson 配置传进去（若为 None 则回退到 env/基线）
         x0_pred = self.diffusion.sample_x0(y, self.generator, anderson=self.anderson_cfg, sc_mode=self.sc_mode)
 
@@ -316,8 +316,13 @@ class BridgeRunner(L.LightningModule):
             try:
                 # 惰性缓存到 runner，避免每步重复加载
                 if not hasattr(self, "_val_mask_cache"):
-                    self._val_mask_cache = self.trainer.datamodule.val_dataset._load_data('mask')
-                val_mask = self._val_mask_cache
+                    self._val_mask_cache = self.trainer.datamodule.val_dataset._load_data('mask')  # (N_val,H,W)
+                # 依据当前 batch 的样本索引切片，得到 (B,H,W) 的 mask
+                if isinstance(idx, torch.Tensor):
+                    index_np = idx.detach().cpu().numpy()
+                else:
+                    index_np = np.asarray(idx)
+                val_mask = self._val_mask_cache[index_np]
             except Exception:
                 val_mask = None
         metrics = compute_metrics(x0, x0_pred, mask=val_mask)
