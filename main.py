@@ -310,7 +310,17 @@ class BridgeRunner(L.LightningModule):
         x0_pred = self.diffusion.sample_x0(y, self.generator, anderson=self.anderson_cfg, sc_mode=self.sc_mode)
 
         loss = F.mse_loss(x0_pred, x0)
-        metrics = compute_metrics(x0, x0_pred)
+        # 可选：验证阶段按需要使用 mask 评估
+        val_mask = None
+        if self.eval_mask:
+            try:
+                # 惰性缓存到 runner，避免每步重复加载
+                if not hasattr(self, "_val_mask_cache"):
+                    self._val_mask_cache = self.trainer.datamodule.val_dataset._load_data('mask')
+                val_mask = self._val_mask_cache
+            except Exception:
+                val_mask = None
+        metrics = compute_metrics(x0, x0_pred, mask=val_mask)
 
         self.log("val_loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("val_psnr", metrics["psnr_mean"], on_epoch=True, prog_bar=True, sync_dist=True)
