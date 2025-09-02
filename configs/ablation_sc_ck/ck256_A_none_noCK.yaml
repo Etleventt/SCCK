@@ -120,4 +120,4 @@ data:
   test_subset_mode: random
   test_subset_seed: 42
 
-ckpt_path:
+ckpt_path: /home/xiaobin/Projects/SelfRDB/logs/ablation_ck256_A_none_noCK/version_2/checkpoints/epoch=4-step=80155.ckpt
