@@ -167,12 +167,13 @@ class DiffusionBridge(L.LightningModule):
         return (x_t - mu_x0 * x0_hat - mu_y * y) / (std + 1e-8)
 
     @torch.inference_mode()
-    def sample_x0(self, y, generator, anderson=None):
+    def sample_x0(self, y, generator, anderson=None, sc_mode: str | None = None):
         """
         Sample p(x_0 | y).
-        - 如果设置 SELFRDB_SC_INFER=1：启用“推理侧SC”，每个时间步只做一次前向，
-          用上一时间步的 x0 估计作为 x_r 传入生成器。
-        - 否则：若指定数值求解器/Anderson 则优先；否则走基线步内递归。
+        - sc_mode 决定步内策略（训练与验证/测试一致）：
+            standard -> 推理侧 SC：每个时间步一次前向，x_r=上一时刻 x0
+            recursion -> 步内递归（或数值解/Anderson，按 env 选择求解器/AA）
+            none -> 无 SC：每个时间步一次前向，x_r=None
         """
         # 设置时间步（降序）
 
@@ -182,14 +183,26 @@ class DiffusionBridge(L.LightningModule):
         # 采样 x_T
         x_t = self.q_sample(timesteps[0], torch.zeros_like(y), y)
 
-        # 推理侧SC优先生效（跨时间步传递上一时刻 x0 作为 x_r）
-        if os.getenv("SELFRDB_SC_INFER", "0") == "1":
+        # 统一按 sc_mode 路由；默认 recursion
+        if isinstance(sc_mode, str):
+            sc_mode = sc_mode.lower().strip()
+        else:
+            sc_mode = "recursion"
+        # 推理侧SC
+        if sc_mode == "standard":
             prev_x0 = None
             for t in timesteps:
                 sc_in = None if prev_x0 is None else prev_x0
                 x0_pred = generator(torch.cat((x_t, y), dim=1), t, x_r=sc_in)
                 x_t = self.q_posterior(t, x_t, x0_pred, y)
                 prev_x0 = x0_pred.detach()
+            return x0_pred
+
+        # 关闭 SC：每个时间步只做一次前向，且 x_r=None（等参“无 SC”）
+        if sc_mode == "none":
+            for t in timesteps:
+                x0_pred = generator(torch.cat((x_t, y), dim=1), t, x_r=None)
+                x_t = self.q_posterior(t, x_t, x0_pred, y)
             return x0_pred
 
         # 解析求解器配置（env 优先，若未设置则回退到 Anderson 或基线递归）

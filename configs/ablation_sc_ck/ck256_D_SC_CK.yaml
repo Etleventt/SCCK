@@ -1,17 +1,19 @@
+# Ablation D: sc_mode=standard, with CK (main method)
+
 # lightning.pytorch==2.0.9.post0
 seed_everything: 42
 
 trainer:
   accelerator: gpu
-  strategy: ddp_find_unused_parameters_false
-  devices: [0,1]                 # 单卡请改为 [0]，并将 sync_batchnorm 设为 false
+  strategy: ddp_find_unused_parameters_true
+  devices: [0,1]
   num_nodes: 1
   precision: 32
   logger:
     - class_path: CSVLogger
       init_args:
         save_dir: logs
-        name: experiment_ck_256
+        name: ablation_ck256_D_SC_CK
   callbacks:
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args:
@@ -19,7 +21,7 @@ trainer:
         leave: true
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        every_n_epochs: 1         # 256 训练更重，降低检查点频率
+        every_n_epochs: 1
         save_on_train_epoch_end: true
         save_top_k: -1
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
@@ -31,39 +33,36 @@ trainer:
   log_every_n_steps: 1
   deterministic: true
   inference_mode: true
-  use_distributed_sampler: true   # 与 256_fair 对齐，val/test 不复用样本
+  use_distributed_sampler: true
   sync_batchnorm: true
 
 model:
   lr_g: 0.00016
-  lr_d: 0.0001                    # 无判别器时忽略
-  disc_grad_penalty_freq: 10       # 忽略
-  disc_grad_penalty_weight: 0.5    # 忽略
+  lr_d: 0.0001
+  disc_grad_penalty_freq: 10
+  disc_grad_penalty_weight: 0.5
   lambda_rec_loss: 0.5
   optim_betas: [0.5, 0.9]
-  eval_mask: true                 # 256 官方集无 mask，沿用 256_fair 设置
+  eval_mask: true
   eval_subject: true
 
-  # —— 关闭判别器，只走无对抗分支 ——
   discriminator_params: null
 
-  # —— SC 策略（standard | recursion | none）——
+  # Ablation: standard SC, with CK
   sc_mode: standard
-  sc_prob: 0.5                     # 保留无效占位
-  sc_stop_grad: true               # 保留无效占位
+  sc_prob: 0.5
+  sc_stop_grad: true
   drop_r_prob: 0.0
 
-  # —— CK 跨步一致性（t→t−1→t−2 vs 直接 t→t−2）——
-  lambda_ck: 0.2                   # 建议 0.1~0.3 起步
-  ck_prob: 0.5                     # 50% 迭代启用，额外一次前向
-  ck_time_norm: true               # 用 1/|a_{t-1}| 做时间归一化
-  ck_detach_tm1: true              # 在 t−1 的 G 输入上 stop-grad
-  ck_shared_noise: true            # 共享噪声的采样版 CK（更匹配 t-1 的输入分布）
-  ck_warmup_steps: 2000            # 前 2000 step 不启用 CK（先让主监督稳定）
-  ck_t_lo_frac: 0.3                # CK 仅在中段时刻使用，避开极吵/极净
+  lambda_ck: 0.2
+  ck_prob: 0.5
+  ck_time_norm: true
+  ck_detach_tm1: true
+  ck_shared_noise: true
+  ck_warmup_steps: 2000
+  ck_t_lo_frac: 0.3
   ck_t_hi_frac: 0.9
-  # 可选：让 CK 在 t 与 t-1 复用同一 SC 掩码，降低随机方差
-  ck_fix_sc_mask: false
+  ck_fix_sc_mask: true
 
   diffusion_params:
     n_steps: 10
@@ -99,8 +98,6 @@ model:
     centered: true
     not_use_tanh: false
 
-  # 如需对比“SC+CK”，可在命令行加：--model.use_standard_sc true
-
 data:
   train_batch_size: 3
   val_batch_size: 2
@@ -114,9 +111,7 @@ data:
   padding: true
   norm: true
   num_workers: 4
-  # 训练按需懒加载，避免一次性读入全部切片
   train_lazy: true
-  # --- 子集裁剪（加速验证/测试，可按需调整为 0 全量）---
   val_max_samples: 200
   val_subset_mode: random
   val_subset_seed: 42
@@ -124,4 +119,4 @@ data:
   test_subset_mode: random
   test_subset_seed: 42
 
-ckpt_path: /home/xiaobin/Projects/SelfRDB/logs/experiment_ck_256/version_7/checkpoints/epoch=5-step=96186.ckpt
+ckpt_path:

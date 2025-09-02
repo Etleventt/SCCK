@@ -31,8 +31,9 @@ class BridgeRunner(L.LightningModule):
         eval_mask,
         eval_subject,
         anderson=None,   # ★ 新增：接受 YAML 的 model.anderson 块
-        # --- SC / Drop-R 相关（可选，保持向后兼容） ---
+        # --- SC / Drop-R 相关（统一用 sc_mode 配置；use_standard_sc 已弃用） ---
         use_standard_sc: bool = False,
+        sc_mode: str = "auto",  # standard | recursion | none | auto(兼容旧配置)
         sc_prob: float = 0.5,
         sc_stop_grad: bool = True,
         drop_r_prob: float = 0.0,
@@ -45,6 +46,7 @@ class BridgeRunner(L.LightningModule):
         ck_warmup_steps: int = 0,
         ck_t_lo_frac: float = 0.0,
         ck_t_hi_frac: float = 1.0,
+        ck_fix_sc_mask: bool = False,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -78,9 +80,16 @@ class BridgeRunner(L.LightningModule):
         self.aa_lam  = float(os.getenv("SELFRDB_AA_LAM", "1e-3"))
         self.aa_damp = float(os.getenv("SELFRDB_AA_DAMP", "0.2"))
 
-        # 标准 SC 与 Drop-R（环境变量可覆盖传参，默认不启用）
-        env_use_sc = os.getenv("SELFRDB_USE_STANDARD_SC")
-        self.use_standard_sc = (env_use_sc == "1") if env_use_sc is not None else bool(use_standard_sc)
+        # 仅使用 sc_mode 决定策略；use_standard_sc 仅作兼容映射，后续将移除
+        if use_standard_sc:
+            print('[DEPRECATION] model.use_standard_sc 已弃用，请改用 model.sc_mode=standard（当前将自动映射）。')
+        self.sc_mode = (sc_mode or "recursion").lower() if isinstance(sc_mode, str) else "recursion"
+        if self.sc_mode == "auto":
+            self.sc_mode = "standard" if bool(use_standard_sc) else "recursion"
+        if self.sc_mode not in {"standard","recursion","none"}:
+            raise ValueError(f"Unsupported sc_mode: {self.sc_mode}")
+        # 兼容旧属性
+        self.use_standard_sc = (self.sc_mode == "standard")
         self.sc_prob = float(os.getenv("SELFRDB_SC_PROB", str(sc_prob)))
         self.sc_stop_grad = (os.getenv("SELFRDB_SC_STOP_GRAD", "1" if sc_stop_grad else "0") == "1")
         self.drop_r_prob = float(os.getenv("SELFRDB_DROP_R_PROB", str(drop_r_prob)))
@@ -94,6 +103,7 @@ class BridgeRunner(L.LightningModule):
         self.ck_warmup_steps = int(os.getenv("SELFRDB_CK_WARMUP", str(ck_warmup_steps)))
         self.ck_t_lo_frac = float(os.getenv("SELFRDB_CK_T_LO_FRAC", str(ck_t_lo_frac)))
         self.ck_t_hi_frac = float(os.getenv("SELFRDB_CK_T_HI_FRAC", str(ck_t_hi_frac)))
+        self.ck_fix_sc_mask = (os.getenv("SELFRDB_CK_FIX_SC_MASK", "1" if ck_fix_sc_mask else "0") == "1")
 
         # 无判别器分支：改为自动优化 + 增加无对抗损失权重
         if not self.use_discriminator:
@@ -114,15 +124,16 @@ class BridgeRunner(L.LightningModule):
             t = torch.randint(1, self.n_steps+1, (x0.shape[0],), device=x0.device)
             x_t, eps = self.diffusion.q_sample(t, x0, y, return_eps=True)
 
-            # 标准 SC：同一 t 两次前向 + stop-grad + 逐样本掩码
-            if self.use_standard_sc:
+            # 选择步内策略：standard | recursion | none
+            if self.sc_mode == "standard":
+                # 标准 SC：同一 t 两次前向 + stop-grad + 逐样本掩码
                 x0_hat1 = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=None)
                 sc_in = x0_hat1.detach() if self.sc_stop_grad else x0_hat1
                 m = (torch.rand(x0.shape[0], 1, 1, 1, device=x0.device) < self.sc_prob).float()
                 sc_in = sc_in * m
                 x0_pred = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=sc_in)
-            else:
-                # 非 SC：可按需要走 Drop-R/AA（一般建议关闭以保持一致）
+            elif self.sc_mode == "recursion":
+                # 自递归：可按需要走 Drop-R/AA（一般建议关闭以保持一致）
                 local_r = self.n_recursions
                 if local_r > 1 and self.drop_r_prob > 0.0 and torch.rand(()) < self.drop_r_prob:
                     local_r = max(1, local_r - 1)
@@ -139,6 +150,9 @@ class BridgeRunner(L.LightningModule):
                     for _ in range(local_r):
                         x0_r = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x0_r)
                     x0_pred = x0_r
+            else:  # none
+                # 关闭 SC/递归：单次前向，x_r=None
+                x0_pred = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=None)
 
             # 噪声监督（DDPM）：epsilon 预测 vs 真实 eps
             shape = [-1] + [1] * (x0.ndim - 1)
@@ -195,14 +209,14 @@ class BridgeRunner(L.LightningModule):
             real_loss += grad_penalty
 
         # 1.b Fake
-        if self.use_standard_sc:
+        if self.sc_mode == "standard":
             # 标准SC：同一 t 两次前向；第二次以 stop-grad 的第一次输出为 SC 通道（逐样本掩码）
             x0_hat1 = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=None)
             sc_in = x0_hat1.detach() if self.sc_stop_grad else x0_hat1
             m = (torch.rand(x0.shape[0], 1, 1, 1, device=x0.device) < self.sc_prob).float()
             sc_in = sc_in * m
             x0_pred = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=sc_in)
-        else:
+        elif self.sc_mode == "recursion":
             # Drop-R：以概率将步内递归从 n_recursions 减 1（至少为 1）
             local_r = self.n_recursions
             if local_r > 1 and self.drop_r_prob > 0.0 and random() < self.drop_r_prob:
@@ -220,6 +234,8 @@ class BridgeRunner(L.LightningModule):
                 for _ in range(local_r):
                     x0_r = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x0_r)
                 x0_pred = x0_r
+        else:  # none
+            x0_pred = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=None)
 
         x_tm1_pred = self.diffusion.q_posterior(t, x_t, x0_pred, y)
         disc_out = self.discriminator(x_tm1_pred, x_t, t)
@@ -240,13 +256,13 @@ class BridgeRunner(L.LightningModule):
         t = torch.randint(1, self.n_steps+1, (x0.shape[0],), device=x0.device)
         x_t = self.diffusion.q_sample(t, x0, y)
 
-        if self.use_standard_sc:
+        if self.sc_mode == "standard":
             x0_hat1 = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=None)
             sc_in = x0_hat1.detach() if self.sc_stop_grad else x0_hat1
             m = (torch.rand(x0.shape[0], 1, 1, 1, device=x0.device) < self.sc_prob).float()
             sc_in = sc_in * m
             x0_pred = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=sc_in)
-        else:
+        elif self.sc_mode == "recursion":
             local_r = self.n_recursions
             if local_r > 1 and self.drop_r_prob > 0.0 and random() < self.drop_r_prob:
                 local_r = max(1, local_r - 1)
@@ -263,6 +279,8 @@ class BridgeRunner(L.LightningModule):
                 for _ in range(local_r):
                     x0_r = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x0_r)
                 x0_pred = x0_r
+        else:
+            x0_pred = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=None)
 
         x_tm1_pred = self.diffusion.q_posterior(t, x_t, x0_pred, y)
 
@@ -289,7 +307,7 @@ class BridgeRunner(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         x0, y, _ = batch
         # 推理：把 YAML 的 anderson 配置传进去（若为 None 则回退到 env/基线）
-        x0_pred = self.diffusion.sample_x0(y, self.generator, anderson=self.anderson_cfg)
+        x0_pred = self.diffusion.sample_x0(y, self.generator, anderson=self.anderson_cfg, sc_mode=self.sc_mode)
 
         loss = F.mse_loss(x0_pred, x0)
         metrics = compute_metrics(x0, x0_pred)
@@ -320,7 +338,7 @@ class BridgeRunner(L.LightningModule):
 
     def test_step(self, batch, batch_idx):
         x0, y, slice_idx = batch
-        x0_pred = self.diffusion.sample_x0(y, self.generator, anderson=self.anderson_cfg)
+        x0_pred = self.diffusion.sample_x0(y, self.generator, anderson=self.anderson_cfg, sc_mode=self.sc_mode)
 
         all_pred = self.all_gather(x0_pred)
         slice_indices = self.all_gather(slice_idx)
@@ -407,16 +425,18 @@ class BridgeRunner(L.LightningModule):
         # sample x_t from forward bridge (no need to return eps here)
         x_t = self.diffusion.q_sample(t, x0, y)
 
-        # One generator forward at t (target branch, stop-grad to stabilize CK)
+        # One generator forward at t (target branch)
         with torch.no_grad():
-            if self.use_standard_sc:
+            if self.sc_mode == "standard":
                 x0_hat1_t = self.generator(torch.cat((x_t, y), dim=1), t, x_r=None)
                 sc_in_t = x0_hat1_t.detach() if self.sc_stop_grad else x0_hat1_t
                 mask_shape = (B, 1) + (1,) * (x_t.ndim - 2)
                 m = (torch.rand(mask_shape, device=device) < self.sc_prob).float()
                 sc_in_t = sc_in_t * m
                 x0_t = self.generator(torch.cat((x_t, y), dim=1), t, x_r=sc_in_t)
-            else:
+            elif self.sc_mode == "recursion":
+                x0_t = self.generator(torch.cat((x_t, y), dim=1), t, x_r=None)
+            else:  # none
                 x0_t = self.generator(torch.cat((x_t, y), dim=1), t, x_r=None)
 
         if self.ck_shared_noise:
@@ -425,16 +445,21 @@ class BridgeRunner(L.LightningModule):
             xi1 = torch.randn_like(x0)
             x_tm1_samp = self.diffusion.q_posterior_sample_shared(t, x_t, x0_t, y, xi1)
 
-            if self.use_standard_sc:
+            if self.sc_mode == "standard":
                 x0_hat1_tm1 = self.generator(torch.cat((x_tm1_samp.detach(), y), dim=1), t-1, x_r=None)
                 sc_in_tm1 = x0_hat1_tm1.detach() if self.sc_stop_grad else x0_hat1_tm1
                 mask_shape = (B, 1) + (1,) * (x_t.ndim - 2)
-                m = (torch.rand(mask_shape, device=device) < self.sc_prob).float()
-                sc_in_tm1 = sc_in_tm1 * m
+                if self.ck_fix_sc_mask:
+                    m_tm1 = m
+                else:
+                    m_tm1 = (torch.rand(mask_shape, device=device) < self.sc_prob).float()
+                sc_in_tm1 = sc_in_tm1 * m_tm1
                 x0_tm1 = self.generator(torch.cat((x_tm1_samp.detach(), y), dim=1), t-1, x_r=sc_in_tm1)
-            else:
+            elif self.sc_mode == "recursion":
                 x0_tm1_in = x_tm1_samp.detach() if self.ck_detach_tm1 else x_tm1_samp
                 x0_tm1 = self.generator(torch.cat((x0_tm1_in, y), dim=1), t-1, x_r=None)
+            else:
+                x0_tm1 = self.generator(torch.cat((x_tm1_samp.detach(), y), dim=1), t-1, x_r=None)
 
             xi2 = torch.randn_like(x0)
             x_tm2_A = self.diffusion.q_posterior_sample_shared(t-1, x_tm1_samp, x0_tm1, y, xi2)
@@ -442,8 +467,14 @@ class BridgeRunner(L.LightningModule):
         else:
             # Mean-CK: use deterministic means (may introduce slight input shift at t-1)
             x_tm1_mean = self.diffusion.q_posterior_mean(t, x_t, x0_t, y)
-            x0_tm1_in = x_tm1_mean.detach() if self.ck_detach_tm1 else x_tm1_mean
-            x0_tm1 = self.generator(torch.cat((x0_tm1_in, y), dim=1), t-1, x_r=None)
+            if self.sc_mode == "standard":
+                # 在 mean 路径下，依然不做步内 SC，只做一次前向
+                x0_tm1 = self.generator(torch.cat((x_tm1_mean.detach() if self.ck_detach_tm1 else x_tm1_mean, y), dim=1), t-1, x_r=None)
+            elif self.sc_mode == "recursion":
+                x0_tm1_in = x_tm1_mean.detach() if self.ck_detach_tm1 else x_tm1_mean
+                x0_tm1 = self.generator(torch.cat((x0_tm1_in, y), dim=1), t-1, x_r=None)
+            else:
+                x0_tm1 = self.generator(torch.cat((x_tm1_mean.detach() if self.ck_detach_tm1 else x_tm1_mean, y), dim=1), t-1, x_r=None)
             x_tm2_A = self.diffusion.q_posterior_mean(t-1, x_tm1_mean, x0_tm1, y)
             x_tm2_B = self.diffusion.q_posterior2_mean(t, x_t, x0_t, y)
 
