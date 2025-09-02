@@ -1,0 +1,122 @@
+# Ablation D: sc_mode=standard, with CK (main method)
+
+# lightning.pytorch==2.0.9.post0
+seed_everything: 42
+
+trainer:
+  accelerator: gpu
+  strategy: ddp_find_unused_parameters_true
+  devices: [0]
+  num_nodes: 1
+  precision: 32
+  logger:
+    - class_path: CSVLogger
+      init_args:
+        save_dir: logs
+        name: ablation_ck256_D_SC_CK
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 1
+        # leave: true
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        every_n_epochs: 1
+        save_on_train_epoch_end: true
+        save_top_k: -1
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: step
+  max_epochs: 5000
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 0
+  log_every_n_steps: 1
+  deterministic: true
+  inference_mode: true
+  use_distributed_sampler: true
+  sync_batchnorm: true
+
+model:
+  lr_g: 0.00016
+  lr_d: 0.0001
+  disc_grad_penalty_freq: 10
+  disc_grad_penalty_weight: 0.5
+  lambda_rec_loss: 0.5
+  optim_betas: [0.5, 0.9]
+  eval_mask: true
+  eval_subject: true
+
+  discriminator_params: null
+
+  # Ablation: standard SC, with CK
+  sc_mode: recursion
+  sc_prob: 0.5
+  sc_stop_grad: true
+  drop_r_prob: 0.0
+
+  lambda_ck: 0.2
+  ck_prob: 0.5
+  ck_time_norm: true
+  ck_detach_tm1: true
+  ck_shared_noise: true
+  ck_warmup_steps: 2000
+  ck_t_lo_frac: 0.3
+  ck_t_hi_frac: 0.9
+  ck_fix_sc_mask: true
+
+  diffusion_params:
+    n_steps: 10
+    beta_start: 0.1
+    beta_end: 3.0
+    gamma: 1
+    n_recursions: 2
+    consistency_threshold: 0.0
+
+  generator_params:
+    self_recursion: true
+    image_size: ${data.image_size}
+    z_emb_dim: 256
+    ch_mult: [1, 1, 2, 2, 4, 4]
+    num_res_blocks: 2
+    attn_resolutions: [16]
+    dropout: 0.0
+    resamp_with_conv: true
+    conditional: true
+    fir: true
+    fir_kernel: [1, 3, 3, 1]
+    skip_rescale: true
+    resblock_type: biggan
+    progressive: none
+    progressive_input: residual
+    embedding_type: positional
+    combine_method: sum
+    fourier_scale: 16
+    nf: 64
+    num_channels: 2
+    nz: 100
+    n_mlp: 3
+    centered: true
+    not_use_tanh: false
+
+data:
+  train_batch_size: 4
+  val_batch_size: 4
+  test_batch_size: 6
+
+  dataset_dir: ./dataset/brats256_selfrdb_official
+  source_modality: t2
+  target_modality: flair
+  dataset_class: NumpyDataset
+  image_size: 256
+  padding: true
+  norm: true
+  num_workers: 4
+  train_lazy: true
+  val_max_samples: 200
+  val_subset_mode: random
+  val_subset_seed: 42
+  test_max_samples: 200
+  test_subset_mode: random
+  test_subset_seed: 42
+
+ckpt_path: /data/projects/SelfRDB/logs/experiment_ck_256-t2-flair/version_6/checkpoints/epoch=4-step=120225.ckpt
