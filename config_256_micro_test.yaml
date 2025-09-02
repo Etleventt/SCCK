@@ -1,0 +1,88 @@
+# lightning.pytorch==2.0.9.post0
+seed_everything: 42
+
+trainer:
+  accelerator: gpu
+  strategy: auto           # 单卡，关闭 DDP
+  devices: [0]
+  precision: 32
+  logger:
+    - class_path: CSVLogger
+      init_args:
+        save_dir: logs
+        name: experiment
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args: { refresh_rate: 1, leave: true }
+  max_epochs: 1            # 测试用，不训练
+  check_val_every_n_epoch: 10
+  num_sanity_val_steps: 0
+  log_every_n_steps: 1
+  deterministic: true
+  inference_mode: true
+  use_distributed_sampler: false
+  sync_batchnorm: false
+
+model:
+  lr_g: 0.00016
+  lr_d: 0.0001
+  disc_grad_penalty_freq: 10
+  disc_grad_penalty_weight: 0.5
+  lambda_rec_loss: 0.5
+  optim_betas: [0.5, 0.9]
+  eval_mask: false
+  eval_subject: true
+
+  diffusion_params:
+    n_steps: 10
+    beta_start: 0.1
+    beta_end: 3.0
+    gamma: 1
+    n_recursions: 2
+    consistency_threshold: 0.01
+
+  generator_params:
+    self_recursion: true
+    image_size: ${data.image_size}
+    z_emb_dim: 256
+    ch_mult: [1, 1, 2, 2, 4, 4]
+    num_res_blocks: 2
+    attn_resolutions: [16]
+    dropout: 0.0
+    resamp_with_conv: true
+    conditional: true
+    fir: true
+    fir_kernel: [1, 3, 3, 1]
+    skip_rescale: true
+    resblock_type: biggan
+    progressive: none
+    progressive_input: residual
+    embedding_type: positional
+    combine_method: sum
+    fourier_scale: 16
+    nf: 64
+    num_channels: 2
+    nz: 100
+    n_mlp: 3
+    centered: true
+    not_use_tanh: false
+
+  discriminator_params:
+    nc: 2
+    ngf: 32
+    t_emb_dim: 256
+
+data:
+  train_batch_size: 4
+  val_batch_size: 4
+  test_batch_size: 32
+  dataset_dir: /home/xiaobin/Projects/SelfRDB/dataset/brats256_selfrdb_small  # ← 换成上一步输出
+  source_modality: t1                                   # 与文件夹名一字不差
+  target_modality: t2
+  dataset_class: NumpyDataset
+  image_size: 256
+  padding: false                                        # ★ 已是 256x256，请关
+  norm: true
+  num_workers: 8
+
+ckpt_path:

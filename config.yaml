@@ -42,7 +42,7 @@ model:
   disc_grad_penalty_weight: 0.5         # Gradient penalty weight for the discriminator
   lambda_rec_loss: 0.5                  # Reconstruction loss weight
   optim_betas: [0.5, 0.9]               # Adam optimizer betas
-  eval_mask: False                       # Whether to use mask during test
+  eval_mask: True                       # Whether to use mask during test
   eval_subject: True                    # Whether to evaluate subject-wise during test (`subject_ids` should be provided in the test dataset)
 
   diffusion_params:
@@ -50,7 +50,7 @@ model:
     beta_start: 0.1                     # Beta start value of the diffusion process
     beta_end: 3.0                       # Beta end value of the diffusion process
     gamma: 1                            # Gamma value that controls noise in the end-point of the bridge
-    n_recursions: 2                     # Max number of recursions (R)
+    n_recursions: 4                     # Max number of recursions (R)
     consistency_threshold: 0.01         # Self-consistency threshold for the recursive step
 
   generator_params:
@@ -89,7 +89,7 @@ data:
   val_batch_size: 4
   test_batch_size: 64
 
-  dataset_dir: ./dataset/brats256_selfrdb_small  # Path to the dataset directory
+  dataset_dir: /home/xiaobin/Projects/SelfRDB/dataset/brats256_micro_pad # Path to the dataset directory
   source_modality: t1
   target_modality: t2
   dataset_class: NumpyDataset           # Dataset class name that can be customized in datasets.py

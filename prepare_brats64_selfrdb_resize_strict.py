@@ -1,67 +1,43 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-SelfRDB-ready BraTS -> NumpyDataset (STRICT to repo requirements + 64px resize)
+SelfRDB-ready BraTS -> NumpyDataset (STRICT to repo requirements + 256px resize)
 -----------------------------------------------------------------------------
-This script prepares a SelfRDB-compatible NumpyDataset directly at 64×64
-resolution by **padding to a centered square canvas** and **resizing** (no
-content crop), while scaling pixel values to **[0,1]** as required in the
-official SelfRDB README.
+这个脚本将 BraTS 多模态体积转换为 **SelfRDB** 可直接使用的 **NumpyDataset**，并将切片统一到
+**256×256** 分辨率：
+- 先对每个 2D 切片做**中心填充到正方形画布**，再**缩放**到 256（不裁剪内容）。
+- 按受试者&模态做**鲁棒分位数缩放**到 **[0,1]**（在参考模态非零掩膜内估计分位数）。
+- 导出与 SelfRDB README 相匹配的目录树（模态/划分/切片），像素为 **float32 ∈ [0,1]**。
+- 下采样后使用掩膜将背景清零，避免插值泄露。
+- 可生成预览拼图以检查强度与居中效果。
 
-References:
-- Repo & dataset format: Images should be scaled to have pixel values in [0,1].
-  https://github.com/icon-lab/SelfRDB (README)
-
-Why this script:
-- Keep exactly the NumpyDataset tree layout expected by SelfRDB.
-- Use robust per-SUBJECT normalization (percentiles over the whole 3D volume
-  within a reference mask) to avoid overly-dark previews.
-- Center the slice on a square canvas before resizing (prevents the “top-edge
-  stuck to the border” artefact from asymmetric padding or bbox-cropping).
-- Write an aligned "mask" modality (binary) derived from the reference modality.
-- Generate preview tiles to visually confirm intensity/centering before export.
+与 64px 版本的差异：默认 `--export_size 256`，其余逻辑保持一致；兼容更常见的 2D 翻译模型
+与预训练权重（例如 SynDiff/SelfRDB 文稿设置）。
 
 Example
 -------
-python prepare_brats64_selfrdb_resize_strict.py \
+python prepare_brats256_selfrdb_resize_strict.py \
   --root /path/to/brats_root \
-  --out_root /path/to/dataset/brats64_selfrdb \
+  --out_root /path/to/dataset/brats256_selfrdb \
   --modalities t1,t2,t1ce,flair \
   --ref_mod t1 \
   --split 0.8 0.1 0.1 \
   --z_lo 0.15 --z_hi 0.95 \
   --q_lo 0.5 --q_hi 99.5 \
-  --export_size 64 \
-  --preview_split val --preview_n 16 --preview_out /tmp/preview64 \
-  --stop_after_preview 1
+  --export_size 256 \
+  --preview_split val --preview_n 16 --preview_out /tmp/preview256 \
+  --ranges_cache /path/to/dataset/brats256_selfrdb/ranges_cache.json \
+  --stop_after_preview 0
 
 Notes
 -----
-* Output slices are **float32 in [0,1]** (SelfRDB will remap to [-1,1] at load
-  time when `data.norm: true`).
-* Background is zeroed via the (downsampled) mask after resizing to avoid
-  interpolation leaks.
-* We **do not crop** anatomies; we center-pad to a square and then resize.
-* We compute percentiles **per subject & modality** across the 3D volume, but
-  only inside the *reference* (e.g., T1) nonzero mask. This keeps consistency
-  between slices and prevents black outputs.
+* 输出切片为 **float32 ∈ [0,1]**（SelfRDB 的 NumpyDataset 要求）。
+* 背景在缩放后乘以掩膜归零，避免插值渗漏。
+* 只做中心填充 + 尺度统一，不裁剪解剖结构。
+* 分位数在**参考模态非零体素**内按体积估计，以避免过暗。
+* 预览阶段可先检查设置，再批量导出。
 
 Tested with: Python 3.10, nibabel, numpy, pillow, tqdm, matplotlib
-
-
-python prepare_brats64_selfrdb_resize_strict.py \
-  --root /home/xiaobin/Projects/DBAE/data/raw/brats \
-  --out_root /home/xiaobin/Projects/SelfRDB/dataset/brats64_selfrdb \
-  --modalities t1,t2,t1ce,flair \
-  --ref_mod t1 \
-  --split 0.8 0.1 0.1 \
-  --z_lo 0.15 --z_hi 0.95 \
-  --q_lo 0.5 --q_hi 99.5 \
-  --export_size 64 \
-  --preview_split val --preview_n 16 --preview_out /home/xiaobin/Projects/SelfRDB/preview_64 \
-  --ranges_cache /home/xiaobin/Projects/SelfRDB/dataset/brats64_selfrdb/ranges_cache.json \
-  --stop_after_preview 0
-
 """
 
 from __future__ import annotations
@@ -71,7 +47,7 @@ from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import nibabel as nib
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from tqdm import tqdm
 
 # ------------------------------ helpers ------------------------------ #
@@ -83,6 +59,7 @@ SUBSETS = [
 ]
 
 def find_subjects(root: Path) -> List[Path]:
+    """Locate BraTS2021_* subject directories under common layouts."""
     pats: List[Path] = []
     for pat in SUBSETS:
         d = root / pat
@@ -90,11 +67,14 @@ def find_subjects(root: Path) -> List[Path]:
             pats += [p for p in d.glob("BraTS2021_*") if p.is_dir()]
     if not pats:
         pats = [p for p in root.glob("TCGA-*/BraTS2021_*") if p.is_dir()]
+    if not pats:
+        # extra fallback: subjects directly under root
+        pats = [p for p in root.glob("BraTS2021_*") if p.is_dir()]
     return sorted(pats)
 
 
 def mod_file(sub: Path, m: str) -> Optional[Path]:
-    ls = list(sub.glob(f"*_{m}.nii*") )
+    ls = list(sub.glob(f"*_{m}.nii*"))
     return ls[0] if ls else None
 
 
@@ -102,7 +82,7 @@ def as_ras_axial(nii_path: Path) -> np.ndarray:
     img = nib.load(str(nii_path))
     ras = nib.as_closest_canonical(img)
     arr = ras.get_fdata(dtype=np.float32)
-    # Final order: (Z, H, W)
+    # final axis order: (Z, H, W)
     return np.transpose(arr, (2, 1, 0))
 
 
@@ -140,10 +120,9 @@ def pil_resize_float01(x01: np.ndarray, size: int) -> np.ndarray:
     return np.clip(out, 0.0, 1.0)
 
 
-
 def pil_resize_mask(mask: np.ndarray, size: int) -> np.ndarray:
     pil = Image.fromarray(mask.astype(np.uint8) * 255, mode="L")
-    # Use bilinear then threshold to keep smoother boundaries at 64px
+    # smoother boundaries at 256px
     pil = pil.resize((size, size), Image.BILINEAR)
     m = (np.asarray(pil, dtype=np.float32) / 255.0) >= 0.5
     return m.astype(np.uint8)
@@ -151,33 +130,28 @@ def pil_resize_mask(mask: np.ndarray, size: int) -> np.ndarray:
 
 def robust_minmax_over_volume(vol: np.ndarray, refmask_vol: np.ndarray,
                               q_lo: float, q_hi: float) -> Tuple[float, float]:
-    """Percentile lo/hi INSIDE the reference nonzero mask across Z,H,W."""
+    """Percentile lo/hi inside the reference nonzero mask across Z,H,W."""
     inside = vol[refmask_vol > 0]
     if inside.size == 0:
         inside = vol.reshape(-1)
     lo = float(np.percentile(inside, q_lo))
     hi = float(np.percentile(inside, q_hi))
     if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
-        # Fallback
         lo = float(np.percentile(vol, 0.5))
         hi = float(np.percentile(vol, 99.5))
     return lo, hi
 
 
 def safe_np_save(path: Path, arr: np.ndarray):
-    """Atomic-ish save that avoids NumPy auto-appending '.npy' twice.
-    Write via file handle to '<fname>.tmp' and then rename.
-    """
+    """Atomic-ish save; write to tmp then rename to avoid double .npy."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")  # e.g. slice_0.npy.tmp
+    tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "wb") as f:
         np.save(f, arr)
     os.replace(tmp, path)
 
 
-def tile_preview(samples: List[Tuple[str, int, Dict[str, np.ndarray]]],
-                 out_png: Path, tile_px: int = 256):
-    """Draw a grid preview; each column is one subject-slice, rows: t1,t2,t1ce,flair."""
+def tile_preview(samples, out_png: Path, tile_px: int = 256):
     mods = ["t1", "t2", "t1ce", "flair"]
     cols = len(samples)
     rows = len(mods)
@@ -194,7 +168,6 @@ def tile_preview(samples: List[Tuple[str, int, Dict[str, np.ndarray]]],
             pil = Image.fromarray((np.clip(x01, 0, 1) * 255.0).astype(np.uint8))
             pil = pil.resize((tile_px, tile_px), Image.NEAREST)
             canvas.paste(pil, (c * tile_px, r * tile_px))
-        # header
         header = f"{sid}|z={z}"
         draw.text((c * tile_px + 6, 6), header, fill=180)
 
@@ -204,7 +177,7 @@ def tile_preview(samples: List[Tuple[str, int, Dict[str, np.ndarray]]],
 # ------------------------------ main ------------------------------ #
 
 def main():
-    ap = argparse.ArgumentParser("BraTS -> SelfRDB NumpyDataset @64px (resize, [0,1])")
+    ap = argparse.ArgumentParser("BraTS -> SelfRDB NumpyDataset @256px (resize, [0,1])")
     ap.add_argument("--root", type=Path, required=True)
     ap.add_argument("--out_root", type=Path, required=True)
     ap.add_argument("--modalities", default="t1,t2,t1ce,flair")
@@ -215,7 +188,7 @@ def main():
     # z-range and export size
     ap.add_argument("--z_lo", type=float, default=0.15)
     ap.add_argument("--z_hi", type=float, default=0.95)
-    ap.add_argument("--export_size", type=int, default=64)
+    ap.add_argument("--export_size", type=int, default=256)
 
     # robust percentiles per SUBJECT (volume-wise)
     ap.add_argument("--q_lo", type=float, default=0.5)
@@ -270,7 +243,7 @@ def main():
 
     rng = np.random.default_rng(args.seed)
 
-    # ---- Pass 0: collect per-subject percentile ranges (inside REF mask) ---- #
+    # ---- Pass 0: per-subject percentile ranges (inside REF mask) ---- #
     print("[Pass0] Preparing per-subject percentile ranges (volume-wise, inside ref mask)…")
     subj_ranges: Dict[str, Dict[str, Tuple[float, float]]] = {}
 
@@ -339,7 +312,6 @@ def main():
                 lo, hi = subj_ranges[sid][m]
                 x = vols[m][z]
                 x = center_pad_to_square(x)
-                # per-subject, per-modality scaling
                 x01 = np.clip((x - lo) / (hi - lo + 1e-6), 0.0, 1.0)
                 x01 = pil_resize_float01(x01, args.export_size)
                 msk = pil_resize_mask(center_pad_to_square(refmask), args.export_size)
@@ -393,7 +365,7 @@ def main():
                     x01 = np.clip((x - lo) / (hi - lo + 1e-6), 0.0, 1.0)
                     x01 = pil_resize_float01(x01, args.export_size)
                     x01 = (x01 * m_low.astype(np.float32)).astype(np.float32)
-                    x01 = np.clip(x01, 0.0, 1.0)   # ★ 最终兜底
+                    x01 = np.clip(x01, 0.0, 1.0)
                     safe_np_save(args.out_root / m / sp / f"slice_{counters[sp]}.npy", x01)
 
                 safe_np_save(args.out_root / "mask" / sp / f"slice_{counters[sp]}.npy", m_low.astype(np.uint8))
@@ -408,7 +380,7 @@ def main():
         "z_range": [args.z_lo, args.z_hi],
         "q": [args.q_lo, args.q_hi],
         "splits": counters,
-        "note": "Images scaled to [0,1] (SelfRDB README requirement)."
+        "note": "Images scaled to [0,1] (SelfRDB-style NumpyDataset)."
     }
     (args.out_root / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     for sp in ["train", "val", "test"]:

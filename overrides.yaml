@@ -1,0 +1,4 @@
+model:
+  diffusion_params:
+    n_recursions: 2
+    consistency_threshold: 0.0

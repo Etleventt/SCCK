@@ -1,0 +1,16 @@
+# overrides/solver_eval.yaml  —— 单卡评测 + 步内递归关掉，交给求解器
+model:
+  diffusion_params:
+    n_steps: 10
+    beta_start: 0.1
+    beta_end: 3.0
+    gamma: 1
+    n_recursions: 0           # ★ 交给数值求解器
+    consistency_threshold: 0.0
+trainer:
+  devices: [0]                # ★ 单卡，避免 DDP 的样本复用
+  strategy: auto
+  use_distributed_sampler: false
+  sync_batchnorm: false       # ★ 单卡请关
+data:
+  test_batch_size: 1024
