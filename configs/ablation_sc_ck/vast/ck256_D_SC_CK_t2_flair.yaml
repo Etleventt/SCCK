@@ -119,4 +119,5 @@ data:
   test_subset_mode: random
   test_subset_seed: 42
 
-ckpt_path: /data/projects/SelfRDB/logs/experiment_ck_256-t2-flair/version_6/checkpoints/epoch=4-step=120225.ckpt
+ckpt_path: 
+# /data/projects/SelfRDB/logs/experiment_ck_256-t2-flair/version_6/checkpoints/epoch=4-step=120225.ckpt
