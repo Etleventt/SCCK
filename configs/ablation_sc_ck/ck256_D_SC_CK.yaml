@@ -49,7 +49,7 @@ model:
   discriminator_params: null
 
   # Ablation: standard SC, with CK
-  sc_mode: standard
+  sc_mode: recursion
   sc_prob: 0.5
   sc_stop_grad: true
   drop_r_prob: 0.0
@@ -119,4 +119,4 @@ data:
   test_subset_mode: random
   test_subset_seed: 42
 
-ckpt_path:
+ckpt_path: /home/xiaobin/Projects/SelfRDB/logs/experiment_ck_256/version_7/checkpoints/epoch=4-step=80155.ckpt

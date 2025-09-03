@@ -53,7 +53,8 @@ optim_betas:
 eval_mask: true
 eval_subject: true
 anderson: null
-use_standard_sc: true
+use_standard_sc: false
+sc_mode: recursion
 sc_prob: 0.5
 sc_stop_grad: true
 drop_r_prob: 0.0
@@ -65,6 +66,7 @@ ck_shared_noise: true
 ck_warmup_steps: 2000
 ck_t_lo_frac: 0.3
 ck_t_hi_frac: 0.9
+ck_fix_sc_mask: true
 _instantiator: lightning.pytorch.cli.instantiate_module
 dataset_dir: /home/xiaobin/Projects/SelfRDB/dataset/brats256_selfrdb_official
 source_modality: t1

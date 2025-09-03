@@ -5,7 +5,7 @@ seed_everything: 42
 
 trainer:
   accelerator: gpu
-  strategy: ddp_find_unused_parameters_true
+  strategy: ddp_find_unused_parameters_false
   devices: [0,1]
   num_nodes: 1
   precision: 32
@@ -13,7 +13,7 @@ trainer:
     - class_path: CSVLogger
       init_args:
         save_dir: logs
-        name: ablation_ck256_C_none_CK
+        name: ablation_ck256_C_none_CK_t1_t2
   callbacks:
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args:
@@ -119,4 +119,5 @@ data:
   test_subset_mode: random
   test_subset_seed: 42
 
-ckpt_path:
+ckpt_path:  /home/xiaobin/Projects/SelfRDB/logs/experiment_ck_256/version_7/checkpoints/epoch=4-step=80155.ckpt
+
