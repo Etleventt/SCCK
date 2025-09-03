@@ -62,7 +62,7 @@ model:
   ck_warmup_steps: 2000
   ck_t_lo_frac: 0.3
   ck_t_hi_frac: 0.9
-  ck_fix_sc_mask: true
+  ck_fix_sc_mask: false
 
   diffusion_params:
     n_steps: 10

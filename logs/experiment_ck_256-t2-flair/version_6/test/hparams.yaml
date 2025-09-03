@@ -54,7 +54,7 @@ eval_mask: true
 eval_subject: true
 anderson: null
 use_standard_sc: false
-sc_mode: recursion
+sc_mode: standard
 sc_prob: 0.5
 sc_stop_grad: true
 drop_r_prob: 0.0
