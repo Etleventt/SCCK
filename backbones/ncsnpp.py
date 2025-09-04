@@ -377,7 +377,7 @@ class NCSNpp(nn.Module):
             mapping_layers.append(self.act)
         self.z_transform = nn.Sequential(*mapping_layers)
 
-    def forward(self, x, time_cond, x_r=None):
+    def forward(self, x, time_cond, x_r=None, z_in=None):
         # Self-recursion
         if self.self_recursion:
             x_r = (
@@ -387,8 +387,8 @@ class NCSNpp(nn.Module):
             )
             x = torch.cat((x_r, x), dim=1)
         
-        # Latent vector
-        z = torch.randn(x.shape[0], self.nz, device=x.device)
+        # Latent vector (optionally provided to keep determinism across paired calls)
+        z = z_in if z_in is not None else torch.randn(x.shape[0], self.nz, device=x.device)
             
         # Timestep/noise_level embedding; only for continuous training
         zemb = self.z_transform(z)

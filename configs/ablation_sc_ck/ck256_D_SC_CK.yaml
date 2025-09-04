@@ -5,7 +5,7 @@ seed_everything: 42
 
 trainer:
   accelerator: gpu
-  strategy: ddp_find_unused_parameters_true
+  strategy: ddp_find_unused_parameters_false
   devices: [0,1]
   num_nodes: 1
   precision: 32
@@ -13,7 +13,7 @@ trainer:
     - class_path: CSVLogger
       init_args:
         save_dir: logs
-        name: ablation_ck256_D_SC_CK
+        name: ablation_ck256_D_SC_CK_t1_t2_dierci
   callbacks:
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args:
@@ -49,7 +49,7 @@ model:
   discriminator_params: null
 
   # Ablation: standard SC, with CK
-  sc_mode: recursion
+  sc_mode: standard
   sc_prob: 0.5
   sc_stop_grad: true
   drop_r_prob: 0.0
@@ -63,6 +63,12 @@ model:
   ck_t_lo_frac: 0.3
   ck_t_hi_frac: 0.9
   ck_fix_sc_mask: false
+  # 关闭 CK 内部的 standard-SC（更干净的 CK 对比）
+  ck_inner_sc: false
+  # 推理端 self-guided（standard 下每步两次前向）：默认关闭
+  eval_self_guided: false
+  # 验证期诊断指标（仅记录，不影响训练）：
+  eval_diag_metrics: true
 
   diffusion_params:
     n_steps: 10
@@ -99,9 +105,9 @@ model:
     not_use_tanh: false
 
 data:
-  train_batch_size: 3
-  val_batch_size: 2
-  test_batch_size: 2
+  train_batch_size: 4
+  val_batch_size: 4
+  test_batch_size: 4
 
   dataset_dir: /home/xiaobin/Projects/SelfRDB/dataset/brats256_selfrdb_official
   source_modality: t1
@@ -119,4 +125,6 @@ data:
   test_subset_mode: random
   test_subset_seed: 42
 
-ckpt_path: /home/xiaobin/Projects/SelfRDB/logs/experiment_ck_256/version_7/checkpoints/epoch=4-step=80155.ckpt
+ckpt_path:  
+#/home/xiaobin/Projects/SelfRDB/logs/experiment_ck_256/version_6/checkpoints/epoch=0-step=16031.ckpt
+# /home/xiaobin/Projects/SelfRDB/logs/ablation_ck256_D_SC_CK_t1_t2_dierci/version_1/checkpoints/epoch=0-step=16031.ckpt

@@ -167,7 +167,7 @@ class DiffusionBridge(L.LightningModule):
         return (x_t - mu_x0 * x0_hat - mu_y * y) / (std + 1e-8)
 
     @torch.inference_mode()
-    def sample_x0(self, y, generator, anderson=None, sc_mode: str | None = None):
+    def sample_x0(self, y, generator, anderson=None, sc_mode: str | None = None, self_guided: bool = False, deterministic_z: bool | None = None):
         """
         Sample p(x_0 | y).
         - sc_mode 决定步内策略（训练与验证/测试一致）：
@@ -191,9 +191,20 @@ class DiffusionBridge(L.LightningModule):
         # 推理侧SC
         if sc_mode == "standard":
             prev_x0 = None
+            # 固定整条轨迹的 z，使跨步自条件时网络保持一致性
+            if generator.nz and generator.nz > 0:
+                z_traj = torch.zeros(y.shape[0], generator.nz, device=y.device) if deterministic_z else torch.randn(y.shape[0], generator.nz, device=y.device)
+            else:
+                z_traj = None
             for t in timesteps:
-                sc_in = None if prev_x0 is None else prev_x0
-                x0_pred = generator(torch.cat((x_t, y), dim=1), t, x_r=sc_in)
+                if not self_guided:
+                    sc_in = None if prev_x0 is None else prev_x0
+                    x0_pred = generator(torch.cat((x_t, y), dim=1), t, x_r=sc_in, z_in=z_traj)
+                else:
+                    # Self-guided：先以 prev_x0 作为自条件得到种子，再用该种子做一次同步 refine
+                    seed_in = None if prev_x0 is None else prev_x0
+                    x0_seed = generator(torch.cat((x_t, y), dim=1), t, x_r=seed_in, z_in=z_traj)
+                    x0_pred = generator(torch.cat((x_t, y), dim=1), t, x_r=x0_seed.detach(), z_in=z_traj)
                 x_t = self.q_posterior(t, x_t, x0_pred, y)
                 prev_x0 = x0_pred.detach()
             return x0_pred
@@ -201,7 +212,11 @@ class DiffusionBridge(L.LightningModule):
         # 关闭 SC：每个时间步只做一次前向，且 x_r=None（等参“无 SC”）
         if sc_mode == "none":
             for t in timesteps:
-                x0_pred = generator(torch.cat((x_t, y), dim=1), t, x_r=None)
+                if generator.nz and generator.nz > 0:
+                    z_step = torch.zeros(x_t.shape[0], generator.nz, device=y.device) if deterministic_z else torch.randn(x_t.shape[0], generator.nz, device=y.device)
+                else:
+                    z_step = None
+                x0_pred = generator(torch.cat((x_t, y), dim=1), t, x_r=None, z_in=z_step)
                 x_t = self.q_posterior(t, x_t, x0_pred, y)
             return x0_pred
 
@@ -231,10 +246,15 @@ class DiffusionBridge(L.LightningModule):
             aa_safe = True
 
         for t in timesteps:
+            # 为步内递归/数值解固定 z，使 F(x) 对给定 (t,x_t,y) 确定
+            if generator.nz and generator.nz > 0:
+                z_shared = torch.zeros(x_t.shape[0], generator.nz, device=y.device) if deterministic_z else torch.randn(x_t.shape[0], generator.nz, device=y.device)
+            else:
+                z_shared = None
             if use_solver:
                 # 数值求解器：对步内固定点 x -> F(x)
                 def F(x_r):
-                    return generator(torch.cat((x_t, y), dim=1), t, x_r=x_r)
+                    return generator(torch.cat((x_t, y), dim=1), t, x_r=x_r, z_in=z_shared)
                 x0_init = torch.zeros_like(x_t)
                 if solver == "picard":
                     x0_pred = picard(F, x0_init, K=max(m_steps, 1), centered=True)
@@ -252,7 +272,7 @@ class DiffusionBridge(L.LightningModule):
             elif use_aa:
                 # Anderson 加速：对步内递归 x_r -> F(x_r)
                 def F(x_r):
-                    return generator(torch.cat((x_t, y), dim=1), t, x_r=x_r)
+                    return generator(torch.cat((x_t, y), dim=1), t, x_r=x_r, z_in=z_shared)
                 x0_pred = anderson_accel(
                     F, torch.zeros_like(x_t),
                     m=aa_m, lam=aa_lam,
@@ -265,7 +285,7 @@ class DiffusionBridge(L.LightningModule):
                 # 基线：原始自一致递归 + 早停（阈值为 0 则基本走满 K）
                 x0_r = torch.zeros_like(x_t)
                 for _ in range(self.n_recursions):
-                    x0_rp1 = generator(torch.cat((x_t, y), dim=1), t, x_r=x0_r)
+                    x0_rp1 = generator(torch.cat((x_t, y), dim=1), t, x_r=x0_r, z_in=z_shared)
                     # 标量化 change，避免分布式/不同维度导致的比较问题
                     change = (x0_rp1 - x0_r).abs().mean().item()
                     if change < float(self.consistency_threshold):
