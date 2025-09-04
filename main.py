@@ -27,12 +27,12 @@ class BridgeRunner(L.LightningModule):
         disc_grad_penalty_freq,
         disc_grad_penalty_weight,
         lambda_rec_loss,
-        # --- Loss weights (YAML-controlled) ---
-        lambda_noise: float = 1.0,
-        lambda_post: float = 0.25,
         optim_betas,
         eval_mask,
         eval_subject,
+        # --- Loss weights (YAML-controlled; defaults, YAML can override) ---
+        lambda_noise: float = 1.0,
+        lambda_post: float = 0.25,
         anderson=None,   # ★ 新增：接受 YAML 的 model.anderson 块
         # --- SC / Drop-R 相关（统一用 sc_mode 配置；use_standard_sc 已弃用） ---
         use_standard_sc: bool = False,
