@@ -13,7 +13,7 @@ trainer:
     - class_path: CSVLogger
       init_args:
         save_dir: logs
-        name: ablation_ck256_C_none_CK_v2
+        name: ablation_ck256_C_none_CK_v2_t1_t2
   callbacks:
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args:
@@ -47,6 +47,7 @@ model:
   optim_betas: [0.5, 0.9]
   eval_mask: true
   eval_subject: true
+  eval_fid_val: true
 
   discriminator_params: null
 
@@ -105,9 +106,9 @@ model:
     not_use_tanh: false
 
 data:
-  train_batch_size: 3
-  val_batch_size: 2
-  test_batch_size: 2
+  train_batch_size: 6
+  val_batch_size: 6
+  test_batch_size: 6
 
   dataset_dir: /home/xiaobin/Projects/SelfRDB/dataset/brats256_selfrdb_official
   source_modality: t1
@@ -125,4 +126,4 @@ data:
   test_subset_mode: random
   test_subset_seed: 42
 
-ckpt_path:
+ckpt_path: /home/xiaobin/Projects/SelfRDB/logs/ablation_ck256_C_none_CK_v2_t1_t2/version_0/checkpoints/epoch=1-step=32062.ckpt

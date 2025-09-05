@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 from random import random
 import numpy as np
 import torch
@@ -12,8 +13,9 @@ from diffusion import DiffusionBridge
 from backbones.ncsnpp import NCSNpp
 from backbones.discriminator import Discriminator_large
 from datasets import DataModule
-from utils import compute_metrics, save_image_pair, save_preds, save_eval_images
+from utils import compute_metrics, save_image_pair, save_preds, save_eval_images, center_crop
 from anderson import anderson_accel
+from fid import InceptionFeatureExtractor, compute_fid, compute_fid_from_numpy
 
 
 class BridgeRunner(L.LightningModule):
@@ -56,6 +58,20 @@ class BridgeRunner(L.LightningModule):
         eval_diag_metrics: bool = False,
         # --- z 确定性开关（默认开启：全局 z=0） ---
         deterministic_z: bool = True,
+        # --- FID 开关与采样上限（默认关闭；可在 YAML 打开） ---
+        eval_fid_val: bool = False,
+        eval_fid_test: bool = False,
+        fid_max_samples_val: int = 0,   # 0 表示不限制
+        fid_max_samples_test: int = 0,  # 0 表示不限制
+        fid_weights_path: Optional[str] = None,
+        # --- 测试阶段：是否仅计算 FID（跳过 PSNR/SSIM 与示例图） ---
+        test_only_fid: bool = False,
+        # --- FID 细节开关 ---
+        fid_use_mask: bool = False,          # 仅在掩膜区域计算 FID（背景置零）
+        fid_crop_to_original: bool = False,  # 计算 FID 前裁剪回未填充尺寸
+        # --- FID 调试：保存送入 Inception 的输入图（去均值/方差后 PNG + 原始张量） ---
+        fid_dump_inputs: bool = False,
+        fid_dump_n: int = 8,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -121,6 +137,23 @@ class BridgeRunner(L.LightningModule):
         self.eval_diag_metrics = bool(eval_diag_metrics)
         # z 开关
         self.deterministic_z = bool(deterministic_z)
+        # FID 配置
+        self.eval_fid_val = bool(eval_fid_val)
+        self.eval_fid_test = bool(eval_fid_test)
+        self.fid_max_samples_val = int(fid_max_samples_val or 0)
+        self.fid_max_samples_test = int(fid_max_samples_test or 0)
+        self.fid_weights_path = fid_weights_path
+        self.test_only_fid = bool(test_only_fid)
+        self.fid_use_mask = bool(fid_use_mask)
+        self.fid_crop_to_original = bool(fid_crop_to_original)
+        self.fid_dump_inputs = bool(fid_dump_inputs)
+        self.fid_dump_n = int(fid_dump_n or 0)
+        # FID 运行时缓存
+        self._fid_net = None
+        self._fid_disabled_reason = None
+        self._fid_val_real = []
+        self._fid_val_fake = []
+        self._fid_val_count = 0
 
         # 无判别器分支：自动优化
         if not self.use_discriminator:
@@ -383,6 +416,37 @@ class BridgeRunner(L.LightningModule):
         self.log("val_psnr", metrics["psnr_mean"], on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("val_ssim", metrics["ssim_mean"], on_epoch=True, prog_bar=True, sync_dist=True)
 
+        # 累计 FID 特征（按批 all_gather 后仅在 rank0 聚合）
+        if self.eval_fid_val:
+            # 懒加载 Inception（如离线无权重则自动禁用）
+            if self._fid_net is None and self._fid_disabled_reason is None:
+                try:
+                    self._fid_net = InceptionFeatureExtractor(weights_path=self.fid_weights_path).to(x0.device)
+                    self._fid_net.eval()
+                except Exception as e:
+                    self._fid_disabled_reason = str(e)
+            if self._fid_net is not None:
+                with torch.no_grad():
+                    fr = self._fid_net(x0)
+                    ff = self._fid_net(x0_pred)
+                # all_gather: [W,B,D] -> reshape to [W*B,D]
+                all_fr = self.all_gather(fr)
+                all_ff = self.all_gather(ff)
+                if self.global_rank == 0:
+                    fr_cpu = all_fr.reshape(-1, all_fr.shape[-1]).detach().cpu().numpy()
+                    ff_cpu = all_ff.reshape(-1, all_ff.shape[-1]).detach().cpu().numpy()
+                    # respect max samples if set
+                    if self.fid_max_samples_val and self._fid_val_count >= self.fid_max_samples_val:
+                        pass
+                    else:
+                        remain = None if self.fid_max_samples_val == 0 else max(0, self.fid_max_samples_val - self._fid_val_count)
+                        if remain is not None and fr_cpu.shape[0] > remain:
+                            fr_cpu = fr_cpu[:remain]
+                            ff_cpu = ff_cpu[:remain]
+                        self._fid_val_real.append(fr_cpu)
+                        self._fid_val_fake.append(ff_cpu)
+                        self._fid_val_count += fr_cpu.shape[0]
+
         # Optional diagnostics: only for standard SC and first val batch for cost control
         if self.eval_diag_metrics and self.sc_mode == "standard" and batch_idx == 0:
             with torch.no_grad():
@@ -421,6 +485,26 @@ class BridgeRunner(L.LightningModule):
         if batch_idx == 0 and self.global_rank == 0:
             path = os.path.join(self.logger.log_dir, "val_samples", f"epoch_{self.current_epoch}.png")
             save_image_pair(x0, x0_pred, path)
+
+    def on_validation_epoch_start(self):
+        # 重置 FID 累计容器
+        if self.eval_fid_val:
+            self._fid_val_real = []
+            self._fid_val_fake = []
+            self._fid_val_count = 0
+
+    def on_validation_epoch_end(self):
+        # 仅 rank0 计算并记录 FID
+        if self.eval_fid_val and self.global_rank == 0 and self._fid_net is not None:
+            try:
+                if len(self._fid_val_real) and len(self._fid_val_fake):
+                    feats_r = np.concatenate(self._fid_val_real, axis=0)
+                    feats_f = np.concatenate(self._fid_val_fake, axis=0)
+                    fid = compute_fid(feats_r, feats_f)
+                    # 记录到日志（只在rank0，无需 sync_dist）
+                    self.log("val_fid", torch.tensor(fid), on_epoch=True, prog_bar=True, sync_dist=False)
+            except Exception:
+                pass
 
     # --------------------
     # Test
@@ -470,26 +554,93 @@ class BridgeRunner(L.LightningModule):
             path = os.path.join(self.logger.log_dir, "test_samples", "pred.npy")
             save_preds(pred, path)
 
-            metrics = compute_metrics(
-                gt_images=target,
-                pred_images=pred,
-                mask=self.mask,
-                subject_ids=self.subject_ids,
-                report_path=os.path.join(self.logger.log_dir, "test_samples", "report.txt")
-            )
+            metrics = None
+            if not self.test_only_fid:
+                metrics = compute_metrics(
+                    gt_images=target,
+                    pred_images=pred,
+                    mask=self.mask,
+                    subject_ids=self.subject_ids,
+                    report_path=os.path.join(self.logger.log_dir, "test_samples", "report.txt")
+                )
 
-            print(f"PSNR: {metrics['psnr_mean']:.2f} ± {metrics['psnr_std']:.2f}")
-            print(f"SSIM: {metrics['ssim_mean']:.2f} ± {metrics['ssim_std']:.2f}")
+                print(f"PSNR: {metrics['psnr_mean']:.2f} ± {metrics['psnr_std']:.2f}")
+                print(f"SSIM: {metrics['ssim_mean']:.2f} ± {metrics['ssim_std']:.2f}")
 
-            indices = np.random.choice(len(dataset), 10)
-            save_eval_images(
-                source_images=source[indices],
-                target_images=target[indices],
-                pred_images=pred[indices],
-                psnrs=metrics["psnrs"][indices],
-                ssims=metrics["ssims"][indices],
-                save_path=os.path.join(self.logger.log_dir, "test_samples")
-            )
+            # 计算并报告 FID（可选）
+            if self.eval_fid_test:
+                try:
+                    # respect max samples if set
+                    if self.fid_max_samples_test and len(pred) > self.fid_max_samples_test:
+                        idx = np.arange(len(pred))
+                        # deterministic subset: take first N (consistent with datamodule default)
+                        idx = idx[: self.fid_max_samples_test]
+                        pred_eval = pred[idx]
+                        target_eval = target[idx]
+                    else:
+                        pred_eval = pred
+                        target_eval = target
+                    # Align shapes for FID: ensure both are [N,H,W]
+                    if isinstance(target_eval, np.ndarray) and target_eval.ndim == 4 and target_eval.shape[1] == 1:
+                        target_eval = target_eval[:, 0, ...]
+                    if isinstance(pred_eval, np.ndarray) and pred_eval.ndim == 4 and pred_eval.shape[1] == 1:
+                        pred_eval = pred_eval[:, 0, ...]
+
+                    # Optional: crop back to original (pre-padding) size to avoid background bias
+                    if self.fid_crop_to_original and getattr(dataset, 'original_shape', None) is not None:
+                        crop_h, crop_w = dataset.original_shape
+                        target_eval = center_crop(target_eval, (int(crop_h), int(crop_w)))
+                        pred_eval   = center_crop(pred_eval,   (int(crop_h), int(crop_w)))
+                        if self.fid_use_mask and self.mask is not None and self.mask.shape[-2:] != (crop_h, crop_w):
+                            mask_use = center_crop(self.mask, (int(crop_h), int(crop_w)))
+                        else:
+                            mask_use = self.mask
+                    else:
+                        mask_use = self.mask
+
+                    # Optional: apply mask to focus on brain region
+                    if self.fid_use_mask and mask_use is not None:
+                        try:
+                            target_eval = target_eval * mask_use
+                            pred_eval   = pred_eval   * mask_use
+                        except Exception:
+                            pass
+
+                    # Use Lightning's current device to avoid mismatches under DDP
+                    device = self.device if isinstance(self.device, torch.device) else torch.device(str(self.device))
+                    dump_dir = os.path.join(self.logger.log_dir, "test_samples", "fid_inputs") if self.fid_dump_inputs else None
+                    fid = compute_fid_from_numpy(
+                        target_eval,
+                        pred_eval,
+                        device=device,
+                        weights_path=self.fid_weights_path,
+                        dump_dir=dump_dir,
+                        dump_n=self.fid_dump_n,
+                    )
+                    if fid is not None:
+                        print(f"FID:  {fid:.4f}")
+                        # append to report
+                        report_path = os.path.join(self.logger.log_dir, "test_samples", "report.txt")
+                        try:
+                            with open(report_path, 'a') as f:
+                                f.write(f"FID: {fid:.4f}\n")
+                        except Exception:
+                            pass
+                    else:
+                        print("FID skipped: Inception weights unavailable (returned None)")
+                except Exception as e:
+                    print(f"FID computation failed: {e}")
+
+            if not self.test_only_fid and metrics is not None:
+                indices = np.random.choice(len(dataset), 10)
+                save_eval_images(
+                    source_images=source[indices],
+                    target_images=target[indices],
+                    pred_images=pred[indices],
+                    psnrs=metrics["psnrs"][indices],
+                    ssims=metrics["ssims"][indices],
+                    save_path=os.path.join(self.logger.log_dir, "test_samples")
+                )
 
     # --------------------
     # Misc

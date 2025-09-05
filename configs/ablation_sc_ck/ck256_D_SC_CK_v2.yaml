@@ -47,8 +47,18 @@ model:
   optim_betas: [0.5, 0.9]
   eval_mask: true
   eval_subject: true
-
+  eval_fid_val: true
+  eval_fid_test: true
+  fid_max_samples_test: 200
+  # 仅测试 FID，加速测试（跳过 PSNR/SSIM 与示例图保存）
+  test_only_fid: true
+  # FID 细节：仅脑区 + 裁剪回原尺寸，减小背景/填充影响
+  fid_use_mask: true
+  fid_crop_to_original: true
   discriminator_params: null
+  fid_weights_path: "/home/xiaobin/.cache/torch/hub/checkpoints/inception_v3_google-1a9a5a14.pth"
+  fid_dump_inputs: true
+  fid_dump_n: 16
 
   # v2: standard SC + CK（t-1 temporal-SC）；无 ck_inner_sc；统一 mask；确定性 z
   sc_mode: standard

@@ -72,6 +72,16 @@ ck_fix_sc_mask: true
 eval_self_guided: false
 eval_diag_metrics: true
 deterministic_z: true
+eval_fid_val: true
+eval_fid_test: true
+fid_max_samples_val: 0
+fid_max_samples_test: 200
+fid_weights_path: /home/xiaobin/.cache/torch/hub/checkpoints/inception_v3_google-1a9a5a14.pth
+test_only_fid: true
+fid_use_mask: true
+fid_crop_to_original: true
+fid_dump_inputs: true
+fid_dump_n: 16
 _instantiator: lightning.pytorch.cli.instantiate_module
 dataset_dir: /home/xiaobin/Projects/SelfRDB/dataset/brats256_selfrdb_official
 source_modality: t1

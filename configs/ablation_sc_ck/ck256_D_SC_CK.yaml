@@ -45,6 +45,7 @@ model:
   optim_betas: [0.5, 0.9]
   eval_mask: true
   eval_subject: true
+  eval_fid_val: true
 
   discriminator_params: null
 
@@ -125,6 +126,6 @@ data:
   test_subset_mode: random
   test_subset_seed: 42
 
-ckpt_path:  
+ckpt_path:  /home/xiaobin/Projects/SelfRDB/logs/ablation_ck256_D_SC_CK_v2_t1_t2/version_0/checkpoints/epoch=7-step=96184.ckpt
 #/home/xiaobin/Projects/SelfRDB/logs/experiment_ck_256/version_6/checkpoints/epoch=0-step=16031.ckpt
 # /home/xiaobin/Projects/SelfRDB/logs/ablation_ck256_D_SC_CK_t1_t2_dierci/version_1/checkpoints/epoch=0-step=16031.ckpt

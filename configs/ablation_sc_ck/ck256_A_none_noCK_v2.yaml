@@ -45,8 +45,10 @@ model:
   lambda_noise: 1.0
   lambda_post: 0.25
   optim_betas: [0.5, 0.9]
-  eval_mask: true
+  eval_mask: false
   eval_subject: true
+  fid_dump_inputs: true
+  fid_dump_n: 16
 
   discriminator_params: null
 
