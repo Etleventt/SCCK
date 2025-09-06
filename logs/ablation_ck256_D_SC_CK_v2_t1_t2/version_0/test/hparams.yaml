@@ -52,6 +52,7 @@ optim_betas:
 - 0.9
 eval_mask: true
 eval_subject: true
+official_compat: false
 lambda_noise: 1.0
 lambda_post: 0.25
 anderson: null
@@ -70,14 +71,15 @@ ck_t_lo_frac: 0.3
 ck_t_hi_frac: 0.9
 ck_fix_sc_mask: true
 eval_self_guided: false
+eval_metrics_official: true
 eval_diag_metrics: true
 deterministic_z: true
-eval_fid_val: true
-eval_fid_test: true
+eval_fid_val: false
+eval_fid_test: false
 fid_max_samples_val: 0
 fid_max_samples_test: 200
 fid_weights_path: /home/xiaobin/.cache/torch/hub/checkpoints/inception_v3_google-1a9a5a14.pth
-test_only_fid: true
+test_only_fid: false
 fid_use_mask: true
 fid_crop_to_original: true
 fid_dump_inputs: true

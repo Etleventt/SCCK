@@ -1,3 +1,2 @@
-PSNR: 24.58 ± 2.73
-SSIM: 92.19 ± 3.80
-Valid/Total slices: 200/200 (skipped=0)
+PSNR: 25.82 ± 3.02
+SSIM: 92.42 ± 3.81

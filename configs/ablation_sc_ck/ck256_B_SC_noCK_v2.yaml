@@ -47,6 +47,7 @@ model:
   optim_betas: [0.5, 0.9]
   eval_mask: true
   eval_subject: true
+  eval_metrics_official: true
 
   discriminator_params: null
 
@@ -127,4 +128,3 @@ data:
   test_subset_seed: 42
 
 ckpt_path:
-

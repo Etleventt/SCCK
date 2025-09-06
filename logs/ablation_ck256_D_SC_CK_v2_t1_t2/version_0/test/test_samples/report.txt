@@ -1,8 +1,2 @@
-PSNR: 29.61 ± 3.18
-SSIM: 95.03 ± 3.24
-Valid/Total slices: 200/200 (skipped=0)
-FID: 48.0521
-FID: 72.7011
-FID: 72.7011
-FID: 72.7011
-FID: 72.7011
+PSNR: 30.11 ± 3.24
+SSIM: 95.08 ± 3.24

@@ -1,0 +1,128 @@
+# SelfRDB official-aligned training config (discriminator path)
+# Matches upstream defaults for optimizer, diffusion, generator/discriminator sizes, and evaluation flags.
+
+seed_everything: 42
+
+trainer:
+  accelerator: gpu
+  strategy: ddp_find_unused_parameters_true
+  devices: [0,1]
+  num_nodes: 1
+  precision: 32
+  logger:
+    - class_path: CSVLogger
+      init_args:
+        save_dir: logs
+        name: experiment_official_rerun
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 1
+        leave: true
+    - class_path: ModelCheckpoint
+      init_args:
+        every_n_epochs: 1
+        save_on_train_epoch_end: true
+        save_top_k: -1
+    - class_path: LearningRateMonitor
+      init_args:
+        logging_interval: step
+  max_epochs: 50
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 0
+  log_every_n_steps: 1
+  deterministic: true
+  inference_mode: true
+  use_distributed_sampler: true
+  sync_batchnorm: true
+
+model:
+  # Optimizer / losses
+  lr_g: 0.00016
+  lr_d: 0.0001
+  disc_grad_penalty_freq: 10
+  disc_grad_penalty_weight: 0.5
+  lambda_rec_loss: 0.5
+  optim_betas: [0.5, 0.9]
+
+  # Evaluation
+  eval_mask: true
+  eval_subject: true
+  eval_metrics_official: true
+  # Keep FID off to match upstream training reports
+  eval_fid_val: false
+  eval_fid_test: false
+
+  # Align training path to upstream (only affects discriminator branch)
+  official_compat: true
+
+  # SC/CK: Upstream trains with recursive self-consistency, without CK
+  sc_mode: recursion
+  drop_r_prob: 0.0
+  lambda_ck: 0.0
+  deterministic_z: false
+
+  diffusion_params:
+    n_steps: 10
+    beta_start: 0.1
+    beta_end: 3.0
+    gamma: 1
+    n_recursions: 2
+    consistency_threshold: 0.01
+
+  generator_params:
+    self_recursion: true
+    image_size: ${data.image_size}
+    z_emb_dim: 256
+    ch_mult: [1, 1, 2, 2, 4, 4]
+    num_res_blocks: 2
+    attn_resolutions: [16]
+    dropout: 0.0
+    resamp_with_conv: true
+    conditional: true
+    fir: true
+    fir_kernel: [1, 3, 3, 1]
+    skip_rescale: true
+    resblock_type: biggan
+    progressive: none
+    progressive_input: residual
+    embedding_type: positional
+    combine_method: sum
+    fourier_scale: 16
+    nf: 64
+    num_channels: 2
+    nz: 100
+    n_mlp: 3
+    centered: true
+    not_use_tanh: false
+
+  discriminator_params:
+    nc: 2
+    ngf: 32
+    t_emb_dim: 256
+
+data:
+  train_batch_size: 6
+  val_batch_size: 6
+  test_batch_size: 32
+
+  # TODO: set this to your prepared dataset root
+  dataset_dir: /home/xiaobin/Projects/SelfRDB/dataset/brats256_selfrdb_official
+  source_modality: t1
+  target_modality: t2
+  dataset_class: NumpyDataset
+  image_size: 256
+  padding: true
+  norm: true
+  num_workers: 32
+  val_max_samples: 200
+  val_subset_mode: random
+  val_subset_seed: 42
+  test_max_samples: 200
+  test_subset_mode: random
+  test_subset_seed: 42
+  train_lazy: true
+
+
+ckpt_path: 
+#logs/download/brats_t1_t2.ckpt 

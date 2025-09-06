@@ -47,11 +47,12 @@ model:
   optim_betas: [0.5, 0.9]
   eval_mask: true
   eval_subject: true
-  eval_fid_val: true
-  eval_fid_test: true
+  eval_metrics_official: true
+  eval_fid_val: false
+  eval_fid_test: false
   fid_max_samples_test: 200
   # 仅测试 FID，加速测试（跳过 PSNR/SSIM 与示例图保存）
-  test_only_fid: true
+  test_only_fid: false
   # FID 细节：仅脑区 + 裁剪回原尺寸，减小背景/填充影响
   fid_use_mask: true
   fid_crop_to_original: true
@@ -138,4 +139,6 @@ data:
   test_subset_mode: random
   test_subset_seed: 42
 
-ckpt_path: /home/xiaobin/Projects/SelfRDB/logs/ablation_ck256_D_SC_CK_v2_t1_t2/version_0/checkpoints/epoch=7-step=96184.ckpt
+ckpt_path: 
+
+#/home/xiaobin/Projects/SelfRDB/logs/ablation_ck256_D_SC_CK_v2_t1_t2/version_0/checkpoints/epoch=7-step=96184.ckpt

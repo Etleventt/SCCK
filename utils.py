@@ -312,3 +312,116 @@ def compute_metrics(
             'subject_reports': {}
         }
         
+
+def compute_metrics_official(
+    gt_images,
+    pred_images,
+    mask=None,
+    norm: str = 'mean',
+    subject_ids=None,
+    report_path=None,
+):
+    """Official-aligned PSNR/SSIM computation.
+
+    Behavior matches icon-lab/SelfRDB: center-crop images to mask size (if given),
+    multiply by mask, per-slice normalize (mean or 01), and compute
+    PSNR/SSIM using skimage with data_range=gt.max() per-slice. SSIM is reported in %.
+    """
+    import warnings
+    import numpy as np
+    from skimage.metrics import peak_signal_noise_ratio as _psnr
+    from skimage.metrics import structural_similarity as _ssim
+    import torch
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+
+        # Squeeze to [N,H,W]
+        gt_images   = gt_images.squeeze() if getattr(gt_images, 'ndim', 0) == 4 else gt_images
+        pred_images = pred_images.squeeze() if getattr(pred_images, 'ndim', 0) == 4 else pred_images
+        gt_images   = gt_images[None, ...]   if getattr(gt_images, 'ndim', 0) == 2   else gt_images
+        pred_images = pred_images[None, ...] if getattr(pred_images, 'ndim', 0) == 2 else pred_images
+        assert gt_images.shape == pred_images.shape, "GT 和 Pred 形状必须一致"
+
+        # To numpy + [-1,1] -> [0,1]
+        if isinstance(gt_images, torch.Tensor):   gt_images = gt_images.detach().cpu().numpy()
+        if isinstance(pred_images, torch.Tensor): pred_images = pred_images.detach().cpu().numpy()
+        if np.nanmin(gt_images)   < -0.1: gt_images   = ((gt_images   + 1) / 2).clip(0, 1)
+        if np.nanmin(pred_images) < -0.1: pred_images = ((pred_images + 1) / 2).clip(0, 1)
+
+        # Choose normalization
+        if norm == 'mean':
+            norm_func = mean_norm
+        elif norm == '01':
+            norm_func = norm_01
+        else:
+            norm_func = mean_norm
+
+        # Apply mask and normalization, official-style: crop images to mask size first
+        if mask is not None:
+            if isinstance(mask, torch.Tensor): mask = mask.detach().cpu().numpy()
+            # center-crop images to mask HxW
+            gt_images   = center_crop(gt_images, mask.shape[-2:])
+            pred_images = center_crop(pred_images, mask.shape[-2:])
+            # per-slice normalize within mask
+            gt_images   = apply_mask_and_norm(gt_images, mask, norm_func)
+            pred_images = apply_mask_and_norm(pred_images, mask, norm_func)
+        else:
+            # global per-slice normalization
+            gt_images   = norm_func(gt_images)
+            pred_images = norm_func(pred_images)
+
+        psnr_values = []
+        ssim_values = []
+
+        for gt, prd in zip(gt_images, pred_images):
+            gt  = gt.squeeze()
+            prd = prd.squeeze()
+            dr = float(np.max(gt))
+            psnr_val = _psnr(gt, prd, data_range=dr)
+            ssim_val = _ssim(gt, prd, data_range=dr) * 100.0
+            psnr_values.append(psnr_val)
+            ssim_values.append(ssim_val)
+
+        psnr_values = np.asarray(psnr_values)
+        ssim_values = np.asarray(ssim_values)
+
+        subject_reports = {}
+        if subject_ids is not None:
+            for i in np.unique(subject_ids):
+                idx = np.where(subject_ids == i)[0]
+                subject_report = {
+                    'psnrs': psnr_values[idx],
+                    'ssims': ssim_values[idx],
+                    'psnr_mean': np.nanmean(psnr_values[idx]),
+                    'ssim_mean': np.nanmean(ssim_values[idx]),
+                    'psnr_std': np.nanstd(psnr_values[idx]),
+                    'ssim_std': np.nanstd(ssim_values[idx])
+                }
+                subject_reports[i] = subject_report
+
+        if subject_ids is not None and len(subject_reports) > 0:
+            psnr_mean = float(np.nanmean([r['psnr_mean'] for r in subject_reports.values()]))
+            ssim_mean = float(np.nanmean([r['ssim_mean'] for r in subject_reports.values()]))
+            psnr_std  = float(np.nanstd ([r['psnr_mean'] for r in subject_reports.values()]))
+            ssim_std  = float(np.nanstd ([r['ssim_mean'] for r in subject_reports.values()]))
+        else:
+            psnr_mean = float(np.nanmean(psnr_values))
+            ssim_mean = float(np.nanmean(ssim_values))
+            psnr_std  = float(np.nanstd (psnr_values))
+            ssim_std  = float(np.nanstd (ssim_values))
+
+        if report_path is not None:
+            with open(report_path, 'w') as f:
+                f.write(f'PSNR: {psnr_mean:.2f} ± {psnr_std:.2f}\n')
+                f.write(f'SSIM: {ssim_mean:.2f} ± {ssim_std:.2f}\n')
+
+        return {
+            'psnr_mean': psnr_mean,
+            'ssim_mean': ssim_mean,
+            'psnr_std': psnr_std,
+            'ssim_std': ssim_std,
+            'psnrs': psnr_values,
+            'ssims': ssim_values,
+            'subject_reports': subject_reports
+        }

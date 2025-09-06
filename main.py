@@ -13,7 +13,7 @@ from diffusion import DiffusionBridge
 from backbones.ncsnpp import NCSNpp
 from backbones.discriminator import Discriminator_large
 from datasets import DataModule
-from utils import compute_metrics, save_image_pair, save_preds, save_eval_images, center_crop
+from utils import compute_metrics, compute_metrics_official, save_image_pair, save_preds, save_eval_images, center_crop
 from anderson import anderson_accel
 from fid import InceptionFeatureExtractor, compute_fid, compute_fid_from_numpy
 
@@ -32,6 +32,8 @@ class BridgeRunner(L.LightningModule):
         optim_betas,
         eval_mask,
         eval_subject,
+        # --- 官方兼容开关：仅影响“有判别器”训练路径的 z 传递方式 ---
+        official_compat: bool = False,
         # --- Loss weights (YAML-controlled; defaults, YAML can override) ---
         lambda_noise: float = 1.0,
         lambda_post: float = 0.25,
@@ -54,6 +56,8 @@ class BridgeRunner(L.LightningModule):
         ck_fix_sc_mask: bool = False,
         # --- 额外开关：验证/测试是否启用 self-guided ---
         eval_self_guided: bool = False,
+        # --- 评测指标：是否采用官方对齐的 PSNR/SSIM 计算（裁剪到掩膜尺寸 + per-slice 归一化 + data_range=gt.max） ---
+        eval_metrics_official: bool = False,
         # --- 验证期诊断指标（仅记录，不参与训练） ---
         eval_diag_metrics: bool = False,
         # --- z 确定性开关（默认开启：全局 z=0） ---
@@ -87,8 +91,11 @@ class BridgeRunner(L.LightningModule):
         self.optim_betas = optim_betas
         self.eval_mask = eval_mask
         self.eval_subject = eval_subject
+        self.eval_metrics_official = bool(eval_metrics_official)
         self.n_steps = diffusion_params['n_steps']
         self.n_recursions = diffusion_params['n_recursions']
+        # 官方兼容（仅用于有判别器路径）：True 时不向生成器传入 z_in，使其每次前向内部采样 z
+        self.official_compat = bool(official_compat)
 
         # Networks
         self.generator = NCSNpp(**generator_params)
@@ -282,8 +289,8 @@ class BridgeRunner(L.LightningModule):
         # 1.b Fake
         if self.sc_mode == "standard":
             # 标准SC：同一 t 两次前向；第二次以 stop-grad 的第一次输出为 SC 通道（逐样本掩码）
-            # 关键改动：两次前向共享同一个 z
-            z_shared = self._z(x_t.shape[0], x_t.device)
+            # 关键改动（默认）：两次前向共享同一个 z；若 official_compat，则不传 z_in（与官方实现保持一致）
+            z_shared = None if self.official_compat else self._z(x_t.shape[0], x_t.device)
             x0_hat1 = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=None, z_in=z_shared)
             sc_in = x0_hat1.detach() if self.sc_stop_grad else x0_hat1
             m = (torch.rand(x0.shape[0], 1, 1, 1, device=x0.device) < self.sc_prob).float()
@@ -304,7 +311,8 @@ class BridgeRunner(L.LightningModule):
                     K=local_r, tol=None  # 训练端不早停
                 )
             else:
-                z_shared = self._z(x_t.shape[0], x_t.device)
+                # 官方兼容：递归内每次前向不传 z_in，由网络内部采样随机 z；否则共享 z 以减少随机性
+                z_shared = None if self.official_compat else self._z(x_t.shape[0], x_t.device)
                 x0_r = torch.zeros_like(x_t)
                 for _ in range(local_r):
                     x0_r = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x0_r, z_in=z_shared)
@@ -334,7 +342,7 @@ class BridgeRunner(L.LightningModule):
         x_t = self.diffusion.q_sample(t, x0, y)
 
         if self.sc_mode == "standard":
-            z_shared = self._z(x_t.shape[0], x_t.device)
+            z_shared = None if self.official_compat else self._z(x_t.shape[0], x_t.device)
             x0_hat1 = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=None, z_in=z_shared)
             sc_in = x0_hat1.detach() if self.sc_stop_grad else x0_hat1
             m = (torch.rand(x0.shape[0], 1, 1, 1, device=x0.device) < self.sc_prob).float()
@@ -354,7 +362,7 @@ class BridgeRunner(L.LightningModule):
                     K=local_r, tol=None
                 )
             else:
-                z_shared = self._z(x_t.shape[0], x_t.device)
+                z_shared = None if self.official_compat else self._z(x_t.shape[0], x_t.device)
                 x0_r = torch.zeros_like(x_t)
                 for _ in range(local_r):
                     x0_r = self.generator(torch.cat((x_t.detach(), y), dim=1), t, x_r=x0_r, z_in=z_shared)
@@ -410,7 +418,8 @@ class BridgeRunner(L.LightningModule):
                 val_mask = self._val_mask_cache[index_np]
             except Exception:
                 val_mask = None
-        metrics = compute_metrics(x0, x0_pred, mask=val_mask)
+        metrics = compute_metrics_official(x0, x0_pred, mask=val_mask) if self.eval_metrics_official \
+                  else compute_metrics(x0, x0_pred, mask=val_mask)
 
         self.log("val_loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("val_psnr", metrics["psnr_mean"], on_epoch=True, prog_bar=True, sync_dist=True)
@@ -492,6 +501,9 @@ class BridgeRunner(L.LightningModule):
             self._fid_val_real = []
             self._fid_val_fake = []
             self._fid_val_count = 0
+        # 打印验证期指标模式（仅 rank0）
+        if getattr(self, 'global_rank', 0) == 0 and self.eval_metrics_official:
+            print("[Val] 官方的 PSNR/SSIM 计算模式已启用：crop-to-mask + per-slice normalization + data_range=gt.max")
 
     def on_validation_epoch_end(self):
         # 仅 rank0 计算并记录 FID
@@ -521,6 +533,9 @@ class BridgeRunner(L.LightningModule):
 
         if self.eval_subject:
             self.subject_ids = self.trainer.datamodule.test_dataset.subject_ids
+        # 打印测试期指标模式（仅 rank0）
+        if getattr(self, 'global_rank', 0) == 0 and self.eval_metrics_official:
+            print("[Eval] Using official-aligned PSNR/SSIM: crop-to-mask + per-slice normalization + data_range=gt.max")
 
     def test_step(self, batch, batch_idx):
         x0, y, slice_idx = batch
@@ -556,13 +571,22 @@ class BridgeRunner(L.LightningModule):
 
             metrics = None
             if not self.test_only_fid:
-                metrics = compute_metrics(
-                    gt_images=target,
-                    pred_images=pred,
-                    mask=self.mask,
-                    subject_ids=self.subject_ids,
-                    report_path=os.path.join(self.logger.log_dir, "test_samples", "report.txt")
-                )
+                if self.eval_metrics_official:
+                    metrics = compute_metrics_official(
+                        gt_images=target,
+                        pred_images=pred,
+                        mask=self.mask,
+                        subject_ids=self.subject_ids,
+                        report_path=os.path.join(self.logger.log_dir, "test_samples", "report.txt")
+                    )
+                else:
+                    metrics = compute_metrics(
+                        gt_images=target,
+                        pred_images=pred,
+                        mask=self.mask,
+                        subject_ids=self.subject_ids,
+                        report_path=os.path.join(self.logger.log_dir, "test_samples", "report.txt")
+                    )
 
                 print(f"PSNR: {metrics['psnr_mean']:.2f} ± {metrics['psnr_std']:.2f}")
                 print(f"SSIM: {metrics['ssim_mean']:.2f} ± {metrics['ssim_std']:.2f}")

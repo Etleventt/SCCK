@@ -133,7 +133,11 @@ class Discriminator_small(nn.Module):
     out = self.conv4(h3,t_embed)
     
     batch, channel, height, width = out.shape
+    # Robust group selection: ensure batch % group == 0 to avoid invalid view
     group = min(batch, self.stddev_group)
+    if batch % group != 0:
+        # fall back to a divisor of batch (gcd), at least 1
+        group = math.gcd(batch, self.stddev_group) or 1
     stddev = out.view(group, -1, self.stddev_feat, channel // self.stddev_feat, height, width)
     stddev = torch.sqrt(stddev.var(0, unbiased=False) + 1e-8)
     stddev = stddev.mean([2, 3, 4], keepdims=True).squeeze(2)
@@ -193,6 +197,8 @@ class Discriminator_large(nn.Module):
     batch, channel, height, width = out.shape
 
     group = min(batch, self.stddev_group)
+    if batch % group != 0:
+        group = math.gcd(batch, self.stddev_group) or 1
     stddev = out.view(group, -1, self.stddev_feat, channel // self.stddev_feat, height, width)
     stddev = torch.sqrt(stddev.var(0, unbiased=False) + 1e-8)
     stddev = stddev.mean([2, 3, 4], keepdims=True).squeeze(2)

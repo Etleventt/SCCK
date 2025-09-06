@@ -1,0 +1,108 @@
+generator_params:
+  self_recursion: true
+  image_size: 256
+  z_emb_dim: 256
+  ch_mult:
+  - 1
+  - 1
+  - 2
+  - 2
+  - 4
+  - 4
+  num_res_blocks: 2
+  attn_resolutions:
+  - 16
+  dropout: 0.0
+  resamp_with_conv: true
+  conditional: true
+  fir: true
+  fir_kernel:
+  - 1
+  - 3
+  - 3
+  - 1
+  skip_rescale: true
+  resblock_type: biggan
+  progressive: none
+  progressive_input: residual
+  embedding_type: positional
+  combine_method: sum
+  fourier_scale: 16
+  nf: 64
+  num_channels: 2
+  nz: 100
+  n_mlp: 3
+  centered: true
+  not_use_tanh: false
+discriminator_params:
+  nc: 2
+  ngf: 32
+  t_emb_dim: 256
+diffusion_params:
+  n_steps: 10
+  beta_start: 0.1
+  beta_end: 3.0
+  gamma: 1
+  n_recursions: 2
+  consistency_threshold: 0.01
+lr_g: 0.00016
+lr_d: 0.0001
+disc_grad_penalty_freq: 10
+disc_grad_penalty_weight: 0.5
+lambda_rec_loss: 0.5
+optim_betas:
+- 0.5
+- 0.9
+eval_mask: true
+eval_subject: true
+official_compat: true
+lambda_noise: 1.0
+lambda_post: 0.25
+anderson: null
+use_standard_sc: false
+sc_mode: recursion
+sc_prob: 0.5
+sc_stop_grad: true
+drop_r_prob: 0.0
+lambda_ck: 0.0
+ck_prob: 0.5
+ck_time_norm: true
+ck_detach_tm1: true
+ck_shared_noise: true
+ck_warmup_steps: 0
+ck_t_lo_frac: 0.0
+ck_t_hi_frac: 1.0
+ck_fix_sc_mask: false
+eval_self_guided: false
+eval_metrics_official: true
+eval_diag_metrics: false
+deterministic_z: false
+eval_fid_val: false
+eval_fid_test: false
+fid_max_samples_val: 0
+fid_max_samples_test: 0
+fid_weights_path: null
+test_only_fid: false
+fid_use_mask: false
+fid_crop_to_original: false
+fid_dump_inputs: false
+fid_dump_n: 8
+_instantiator: lightning.pytorch.cli.instantiate_module
+dataset_dir: /home/xiaobin/Projects/SelfRDB/dataset/brats256_selfrdb_official
+source_modality: t1
+target_modality: t2
+dataset_class: NumpyDataset
+image_size: 256
+padding: true
+norm: true
+train_batch_size: 8
+val_batch_size: 8
+test_batch_size: 32
+num_workers: 32
+test_max_samples: 200
+test_subset_mode: random
+test_subset_seed: 42
+val_max_samples: 200
+val_subset_mode: random
+val_subset_seed: 42
+train_lazy: true
